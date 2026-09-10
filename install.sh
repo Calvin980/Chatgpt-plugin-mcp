@@ -540,4 +540,25 @@ cat > $PREFIX/bin/termux-mcp-stdio <<'EOF'
 # Usage:
 #   termux-mcp-stdio               → restricted STDIO mode
 #   termux-mcp-stdio unrestricted  → unrestricted STDIO mode
-if [ "$1" = "unrestricted" ]; the
+if [ "$1" = "unrestricted" ]; then
+  export MCP_ALLOW_UNRESTRICTED=1
+else
+  export MCP_ALLOW_UNRESTRICTED=0
+fi
+exec node ~/termux-mcp/stdio-server.mjs
+EOF
+chmod +x $PREFIX/bin/termux-mcp-stdio
+
+echo ""
+echo "Installation complete!"
+echo ""
+echo "Commands:"
+echo "  termux-mcp                 # HTTP + tunnel, restricted mode"
+echo "  termux-mcp unrestricted    # HTTP + tunnel, UNRESTRICTED mode"
+echo "  termux-mcp-stdio           # STDIO, restricted mode"
+echo "  termux-mcp-stdio unrestricted  # STDIO, UNRESTRICTED mode"
+echo ""
+echo "Test STDIO: bash ~/termux-mcp/test-stdio.sh"
+echo ""
+echo "🚨 Unrestricted mode gives full shell access to your device."
+echo "   Only use it while the tunnel is up and you're actively working."

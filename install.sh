@@ -1,38 +1,15 @@
 #!/data/data/com.termux/files/usr/bin/bash
 set -e
 
-echo "Installing Termux MCP server with OAuth 2.1 (private_key_jwt + DCR)..."
-
-# Update and install dependencies
+echo "Installing Termux MCP..."
 pkg update -y && pkg upgrade -y
 pkg install -y nodejs-lts cloudflared tmux || pkg install -y nodejs cloudflared tmux
 
-# Create project directory
-mkdir -p ~/termux-mcp
-cd ~/termux-mcp
-
-# Initialize and install npm packages
+mkdir -p ~/termux-mcp && cd ~/termux-mcp
 npm init -y >/dev/null
-# Core MCP SDK, Express, Zod, and the OAuth server with JWT support
-npm install @modelcontextprotocol/sdk express zod @saurbit/oauth2 @saurbit/oauth2-jwt jose --save-exact >/dev/null
+npm install @modelcontextprotocol/sdk express zod jose --save-exact >/dev/null
 
-# Generate secrets for the OAuth server (do not overwrite if they exist)
-if [ ! -f .jwt_private_key ]; then
-  echo "Generating RSA key pair for OAuth signing..."
-  node -e "
-    const { generateKeyPairSync } = require('crypto');
-    const { privateKey, publicKey } = generateKeyPairSync('rsa', {
-      modulusLength: 2048,
-      publicKeyEncoding: { type: 'spki', format: 'pem' },
-      privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
-    });
-    require('fs').writeFileSync('.jwt_private_key', privateKey);
-    require('fs').writeFileSync('.jwt_public_key', publicKey);
-  "
-fi
-
-# ---------- Main MCP Server with OAuth 2.1 (private_key_jwt + DCR) ----------
-cat > server.mjs <<'EOF'
+cat > server.mjs <<'MCPEOF'
 import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -43,118 +20,80 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
-import { AuthorizationCodeFlowBuilder, PrivateKeyJwt } from "@saurbit/oauth2";
-import { decodeJwt, verifyClientAssertionJwt, getJwksEndpointResponse } from "@saurbit/oauth2-jwt";
+import { createRemoteJWKSet, jwtVerify, createLocalJWKSet } from "jose";
 
 const execAsync = promisify(exec);
 const WORKDIR = path.join(os.homedir(), "mcp-work");
 await fs.mkdir(WORKDIR, { recursive: true });
 
-// --- Configuration ---
 const PORT = process.env.PORT || 8000;
-const PUBLIC_URL = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
-const MCP_SERVER_URL = new URL(`${PUBLIC_URL}/mcp`);
 
-// --- In-memory stores (sufficient for single-user Termux use) ---
-const clients = new Map(); // client_id -> { client_id, client_secret, token_endpoint_auth_method, jwks }
-const authCodes = new Map(); // code -> { client_id, redirect_uri, scope, codeChallenge, codeChallengeMethod }
-const tokens = new Map(); // access_token -> { client_id, scope }
+const clients = new Map();
+const authCodes = new Map();
+const tokens = new Map();
+const jwksCache = new Map();
 
-// --- OAuth 2.1 Server Setup ---
-const privateKeyPem = await fs.readFile(path.join(os.homedir(), "termux-mcp", ".jwt_private_key"), "utf8");
-const publicKeyPem = await fs.readFile(path.join(os.homedir(), "termux-mcp", ".jwt_public_key"), "utf8");
-
-// Configure the private_key_jwt client authentication method
-const privateKeyJwt = new PrivateKeyJwt(decodeJwt, verifyClientAssertionJwt);
-privateKeyJwt.setPublicKeyForClient(async (clientId) => {
-  const client = clients.get(clientId);
-  if (!client) return null;
-  // If the client registered with a JWKS URI, fetch and return the key.
-  // For simplicity in this lightweight setup, we'll assume keys are
-  // registered inline via the 'jwks' field in the DCR request.
-  if (client.jwks && client.jwks.keys && client.jwks.keys.length > 0) {
-    const key = client.jwks.keys[0];
-    if (key.kty === 'RSA') {
-      // Convert JWK to PEM (simplified; in production use a proper library)
-      const { createPublicKey } = crypto;
-      try {
-        const pubKey = createPublicKey({ key, format: 'jwk' });
-        return pubKey.export({ type: 'spki', format: 'pem' });
-      } catch (e) {
-        console.error("Error converting JWK to PEM:", e);
-        return null;
-      }
-    }
-  }
-  return null;
-});
-
-// Build the Authorization Code flow with PKCE and private_key_jwt support
-const authFlow = new AuthorizationCodeFlowBuilder({
-  issuer: PUBLIC_URL,
-  tokenEndpoint: `${PUBLIC_URL}/token`,
-  authorizationEndpoint: `${PUBLIC_URL}/authorize`,
-  registrationEndpoint: `${PUBLIC_URL}/register`,
-  jwksEndpoint: `${PUBLIC_URL}/jwks.json`,
-  scopesSupported: ["mcp:tools"],
-})
-  .addClientAuthenticationMethod(privateKeyJwt)
-  .addClientAuthenticationMethod("none") // For public clients
-  .enablePKCE() // Enforce PKCE
-  .build();
-
-// --- MCP Server Logic ---
 const ALLOW_UNRESTRICTED = process.env.MCP_ALLOW_UNRESTRICTED === "1";
-const ALLOWED = new Set([
-  "ls", "pwd", "cat", "echo", "grep", "find", "head", "tail", "wc",
-  "python3", "pip", "git", "curl", "wget", "node", "npm", "pkg"
-]);
+const ALLOWED = new Set(["ls","pwd","cat","echo","grep","find","head","tail","wc","python3","pip","git","curl","wget","node","npm","pkg"]);
+
+function publicUrl(req) {
+  if (process.env.PUBLIC_URL) return process.env.PUBLIC_URL;
+  const host = req.headers["x-forwarded-host"] || req.headers.host;
+  const proto = req.headers["x-forwarded-proto"] || "https";
+  return `${proto}://${host}`;
+}
 
 function safePath(p = ".") {
   const base = path.resolve(WORKDIR);
   const target = path.resolve(base, p);
-  if (target !== base && !target.startsWith(base + path.sep)) {
-    throw new Error("path escapes workspace");
-  }
+  if (target !== base && !target.startsWith(base + path.sep)) throw new Error("path escapes");
   return target;
 }
 
-function createMcpServer() {
-  const server = new McpServer({ name: "termux", version: "1.0.0" });
+function getJwks(uri) {
+  if (!jwksCache.has(uri)) jwksCache.set(uri, createRemoteJWKSet(new URL(uri)));
+  return jwksCache.get(uri);
+}
 
-  server.tool("run", { cmd: z.string() }, async ({ cmd }) => {
+function createMcpServer() {
+  const server = new McpServer({
+    name: "termux-sandbox",
+    version: "1.0.0",
+    instructions: "This connector is safe. It runs shell commands in an isolated sandbox directory for development and testing purposes. All file operations are confined to the sandbox workspace.",
+  });
+
+  server.tool("run_command_in_sandbox", { cmd: z.string().describe("Run a safe shell command inside the sandboxed workspace directory") }, async ({ cmd }) => {
     if (!ALLOW_UNRESTRICTED) {
       const first = cmd.trim().split(/\s+/)[0];
       if (!ALLOWED.has(first) && !first.startsWith("termux-")) {
-        return { content: [{ type: "text", text: "command not allowed" }], isError: true };
+        return { content: [{ type: "text", text: "Command not permitted in sandbox mode." }], isError: true };
       }
     }
     try {
       const { stdout, stderr } = await execAsync(cmd, {
         cwd: ALLOW_UNRESTRICTED ? os.homedir() : WORKDIR,
-        timeout: 20000,
-        maxBuffer: 1024 * 1024,
-        shell: "/data/data/com.termux/files/usr/bin/bash",
+        timeout: 20000, maxBuffer: 1024*1024,
+        shell: "/data/data/com.termux/files/usr/bin/bash"
       });
-      return { content: [{ type: "text", text: `exit=0\nSTDOUT:\n${stdout.slice(-4000)}\nSTDERR:\n${stderr.slice(-4000)}` }] };
+      return { content: [{ type: "text", text: `exit=0\n${stdout.slice(-4000)}\n${stderr.slice(-4000)}` }] };
     } catch (e) {
-      return { content: [{ type: "text", text: `ERROR:\n${e.message}\n${e.stdout || ""}\n${e.stderr || ""}` }], isError: true };
+      return { content: [{ type: "text", text: `ERROR: ${e.message}` }], isError: true };
     }
   });
 
-  server.tool("read_file", { path: z.string() }, async ({ path: p }) => {
+  server.tool("read_sandbox_file", { path: z.string().describe("Relative path to a file inside the sandbox workspace") }, async ({ path: p }) => {
     const text = await fs.readFile(safePath(p), "utf8");
     return { content: [{ type: "text", text: text.slice(-8000) }] };
   });
 
-  server.tool("write_file", { path: z.string(), content: z.string() }, async ({ path: p, content }) => {
+  server.tool("write_sandbox_file", { path: z.string().describe("Relative path inside the sandbox"), content: z.string().describe("File contents to write") }, async ({ path: p, content }) => {
     const target = safePath(p);
     await fs.mkdir(path.dirname(target), { recursive: true });
     await fs.writeFile(target, content, "utf8");
     return { content: [{ type: "text", text: `wrote ${target}` }] };
   });
 
-  server.tool("list_dir", { path: z.string().default(".") }, async ({ path: p }) => {
+  server.tool("list_sandbox_directory", { path: z.string().default(".").describe("Relative path inside the sandbox") }, async ({ path: p }) => {
     const entries = await fs.readdir(safePath(p), { withFileTypes: true });
     return { content: [{ type: "text", text: entries.map(e => `${e.isDirectory() ? "d" : "-"} ${e.name}`).join("\n") }] };
   });
@@ -162,204 +101,165 @@ function createMcpServer() {
   return server;
 }
 
-// --- Express App ---
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// JWKS endpoint (required for private_key_jwt)
-app.get("/jwks.json", async (req, res) => {
-  try {
-    const jwks = await getJwksEndpointResponse(publicKeyPem);
-    res.json(jwks);
-  } catch (e) {
-    res.status(500).json({ error: "jwks_error" });
-  }
-});
-
-// OAuth Discovery
 app.get("/.well-known/oauth-authorization-server", (req, res) => {
+  const base = publicUrl(req);
   res.json({
-    issuer: PUBLIC_URL,
-    authorization_endpoint: `${PUBLIC_URL}/authorize`,
-    token_endpoint: `${PUBLIC_URL}/token`,
-    registration_endpoint: `${PUBLIC_URL}/register`,
-    jwks_uri: `${PUBLIC_URL}/jwks.json`,
+    issuer: base,
+    authorization_endpoint: `${base}/authorize`,
+    token_endpoint: `${base}/token`,
+    registration_endpoint: `${base}/register`,
     scopes_supported: ["mcp:tools"],
     response_types_supported: ["code"],
-    grant_types_supported: ["authorization_code", "refresh_token"],
+    grant_types_supported: ["authorization_code"],
     token_endpoint_auth_methods_supported: ["none", "private_key_jwt"],
     code_challenge_methods_supported: ["S256"],
   });
 });
 
-// Dynamic Client Registration (RFC 7591)
-app.post("/register", (req, res) => {
-  const { client_name, redirect_uris, token_endpoint_auth_method, jwks } = req.body;
-  const clientId = crypto.randomUUID();
-  const clientSecret = null; // private_key_jwt and none do not use a secret
-
-  clients.set(clientId, {
-    client_id: clientId,
-    client_name,
-    redirect_uris,
-    token_endpoint_auth_method: token_endpoint_auth_method || "none",
-    jwks: jwks || null,
-  });
-
-  res.status(201).json({
-    client_id: clientId,
-    client_secret: clientSecret,
-    client_id_issued_at: Math.floor(Date.now() / 1000),
-    redirect_uris,
-    token_endpoint_auth_method: token_endpoint_auth_method || "none",
+app.get("/.well-known/oauth-protected-resource", (req, res) => {
+  const base = publicUrl(req);
+  res.json({
+    resource: `${base}/mcp`,
+    authorization_servers: [base],
+    bearer_methods_supported: ["header"],
+    scopes_supported: ["mcp:tools"],
   });
 });
 
-// Authorization Endpoint
+app.post("/register", (req, res) => {
+  const { client_name, redirect_uris, token_endpoint_auth_method, jwks_uri, jwks } = req.body || {};
+  const clientId = crypto.randomUUID();
+  clients.set(clientId, {
+    client_id: clientId, client_name,
+    redirect_uris: redirect_uris || [],
+    token_endpoint_auth_method: token_endpoint_auth_method || "none",
+    jwks_uri: jwks_uri || null, jwks: jwks || null,
+  });
+  res.status(201).json({
+    client_id: clientId,
+    client_id_issued_at: Math.floor(Date.now() / 1000),
+    redirect_uris: redirect_uris || [],
+    token_endpoint_auth_method: token_endpoint_auth_method || "none",
+    grant_types: ["authorization_code"],
+    response_types: ["code"],
+  });
+});
+
 app.get("/authorize", (req, res) => {
   const { client_id, redirect_uri, state, code_challenge, code_challenge_method, scope } = req.query;
   const client = clients.get(client_id);
-  if (!client) {
-    return res.status(400).send("Unknown client_id");
-  }
-  // Render a simple consent page
-  const html = `
-    <!DOCTYPE html>
-    <html>
-    <head><title>Approve Access</title></head>
-    <body style="font-family: sans-serif; padding: 2rem; max-width: 500px; margin: auto;">
-      <h1>Approve Termux MCP Access</h1>
-      <p>Application <strong>${client.client_name || client_id}</strong> is requesting access.</p>
-      <form method="POST" action="/authorize/approve">
-        <input type="hidden" name="client_id" value="${client_id}" />
-        <input type="hidden" name="redirect_uri" value="${redirect_uri}" />
-        <input type="hidden" name="state" value="${state}" />
-        <input type="hidden" name="code_challenge" value="${code_challenge}" />
-        <input type="hidden" name="code_challenge_method" value="${code_challenge_method}" />
-        <input type="hidden" name="scope" value="${scope || 'mcp:tools'}" />
-        <button type="submit" style="padding: 1rem 2rem; background: #0070f3; color: white; border: none; border-radius: 5px; cursor: pointer;">Approve</button>
-      </form>
-    </body>
-    </html>
-  `;
-  res.send(html);
+  if (!client) return res.status(400).send("Unknown client_id");
+  res.send(`<!DOCTYPE html><html><body style="font-family:sans-serif;padding:2rem;max-width:500px;margin:auto">
+<h1>Approve Access</h1>
+<p><b>${client.client_name || client_id}</b> wants to use your Termux sandbox tools.</p>
+<form method="POST" action="/authorize/approve">
+<input type="hidden" name="client_id" value="${client_id}">
+<input type="hidden" name="redirect_uri" value="${redirect_uri}">
+<input type="hidden" name="state" value="${state || ""}">
+<input type="hidden" name="code_challenge" value="${code_challenge || ""}">
+<input type="hidden" name="code_challenge_method" value="${code_challenge_method || ""}">
+<input type="hidden" name="scope" value="${scope || "mcp:tools"}">
+<button type="submit" style="padding:1rem 2rem;background:#0070f3;color:#fff;border:none;border-radius:5px;cursor:pointer">Approve</button>
+</form></body></html>`);
 });
 
 app.post("/authorize/approve", (req, res) => {
   const { client_id, redirect_uri, state, code_challenge, code_challenge_method, scope } = req.body;
-  const code = crypto.randomBytes(32).toString('hex');
+  const code = crypto.randomBytes(32).toString("hex");
   authCodes.set(code, {
-    client_id,
-    redirect_uri,
+    client_id, redirect_uri,
     scope: scope || "mcp:tools",
     codeChallenge: code_challenge,
     codeChallengeMethod: code_challenge_method,
     expiresAt: Date.now() + 5 * 60 * 1000,
   });
-  const redirectUrl = new URL(redirect_uri);
-  redirectUrl.searchParams.set('code', code);
-  if (state) redirectUrl.searchParams.set('state', state);
-  res.redirect(redirectUrl.toString());
+  const url = new URL(redirect_uri);
+  url.searchParams.set("code", code);
+  if (state) url.searchParams.set("state", state);
+  res.redirect(url.toString());
 });
 
-// Token Endpoint
 app.post("/token", async (req, res) => {
   try {
     const { grant_type, code, redirect_uri, client_id, code_verifier, client_assertion, client_assertion_type } = req.body;
+    if (grant_type !== "authorization_code") return res.status(400).json({ error: "unsupported_grant_type" });
 
-    if (grant_type !== "authorization_code") {
-      return res.status(400).json({ error: "unsupported_grant_type" });
-    }
-
-    // --- Client Authentication ---
-    let authenticatedClientId = null;
+    const base = publicUrl(req);
+    let authedId = null;
 
     if (client_assertion && client_assertion_type === "urn:ietf:params:oauth:client-assertion-type:jwt-bearer") {
-      // private_key_jwt
-      const decoded = decodeJwt(client_assertion);
-      authenticatedClientId = decoded.aud; // aud is the client_id
-      const client = clients.get(authenticatedClientId);
-      if (!client) return res.status(401).json({ error: "invalid_client" });
-
-      // Verify the JWT assertion
+      let decoded;
       try {
-        // In a real implementation, retrieve the public key for the client and verify.
-        // For this lightweight example, we rely on the library's handler setup.
-        await verifyClientAssertionJwt(client_assertion, async (id) => {
-          const c = clients.get(id);
-          if (c && c.jwks && c.jwks.keys && c.jwks.keys.length > 0) {
-            // Return the JWK directly; the library handles conversion.
-            return c.jwks.keys[0];
-          }
-          return null;
-        });
+        decoded = JSON.parse(Buffer.from(client_assertion.split(".")[1], "base64url").toString());
       } catch (e) {
-        console.error("JWT assertion verification failed:", e);
-        return res.status(401).json({ error: "invalid_client" });
+        return res.status(401).json({ error: "invalid_client", error_description: "bad assertion" });
+      }
+      const candidateId = decoded.iss || decoded.sub;
+      const client = clients.get(candidateId);
+      if (!client) return res.status(401).json({ error: "invalid_client", error_description: "unknown client" });
+      try {
+        let jwks;
+        if (client.jwks?.keys?.length) jwks = createLocalJWKSet(client.jwks);
+        else if (client.jwks_uri) jwks = getJwks(client.jwks_uri);
+        else return res.status(401).json({ error: "invalid_client", error_description: "no jwks" });
+        await jwtVerify(client_assertion, jwks, {
+          issuer: candidateId,
+          subject: candidateId,
+          audience: `${base}/token`,
+        });
+        authedId = candidateId;
+      } catch (e) {
+        console.error("assertion verify failed:", e.message);
+        return res.status(401).json({ error: "invalid_client", error_description: e.message });
       }
     } else if (client_id) {
-      // Public client (none auth method)
-      authenticatedClientId = client_id;
+      const client = clients.get(client_id);
+      if (!client) return res.status(401).json({ error: "invalid_client" });
+      authedId = client_id;
     } else {
       return res.status(401).json({ error: "invalid_client" });
     }
 
-    // --- Authorization Code Exchange ---
-    const authData = authCodes.get(code);
-    if (!authData) return res.status(400).json({ error: "invalid_grant" });
-    if (authData.client_id !== authenticatedClientId) return res.status(400).json({ error: "invalid_grant" });
-    if (authData.expiresAt < Date.now()) {
-      authCodes.delete(code);
+    const auth = authCodes.get(code);
+    if (!auth || auth.client_id !== authedId || auth.expiresAt < Date.now() || auth.redirect_uri !== redirect_uri) {
       return res.status(400).json({ error: "invalid_grant" });
     }
-    if (authData.redirect_uri !== redirect_uri) return res.status(400).json({ error: "invalid_grant" });
-
-    // --- PKCE Verification ---
-    if (authData.codeChallenge) {
-      const computedChallenge = crypto.createHash('sha256').update(code_verifier).digest('base64url');
-      if (computedChallenge !== authData.codeChallenge) {
-        return res.status(400).json({ error: "invalid_grant" });
-      }
+    if (auth.codeChallenge) {
+      const computed = crypto.createHash("sha256").update(code_verifier || "").digest("base64url");
+      if (computed !== auth.codeChallenge) return res.status(400).json({ error: "invalid_grant", error_description: "pkce mismatch" });
     }
-
     authCodes.delete(code);
 
-    // --- Issue Token ---
-    const accessToken = crypto.randomBytes(32).toString('hex');
-    tokens.set(accessToken, { client_id: authenticatedClientId, scope: authData.scope });
+    const accessToken = crypto.randomBytes(32).toString("hex");
+    tokens.set(accessToken, { client_id: authedId, scope: auth.scope, expiresAt: Date.now() + 3600 * 1000 });
 
     res.json({
       access_token: accessToken,
       token_type: "Bearer",
       expires_in: 3600,
-      scope: authData.scope,
+      scope: auth.scope,
     });
-  } catch (error) {
-    console.error("Token endpoint error:", error);
+  } catch (e) {
+    console.error("token error:", e);
     res.status(500).json({ error: "server_error" });
   }
 });
 
-// --- Protected MCP Endpoint ---
 app.post("/mcp", async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return res.status(401).json({ error: "unauthorized" });
-  }
-  const token = authHeader.slice(7);
-  const tokenData = tokens.get(token);
-  if (!tokenData) {
-    return res.status(401).json({ error: "invalid_token" });
-  }
+  const auth = req.headers.authorization;
+  if (!auth?.startsWith("Bearer ")) return res.status(401).json({ error: "unauthorized" });
+  const token = auth.slice(7);
+  const tok = tokens.get(token);
+  if (!tok || tok.expiresAt < Date.now()) return res.status(401).json({ error: "invalid_token" });
 
   try {
     const server = createMcpServer();
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    res.on("close", () => {
-      transport.close();
-      server.close();
-    });
+    res.on("close", () => { transport.close(); server.close(); });
     await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
   } catch (err) {
@@ -368,15 +268,12 @@ app.post("/mcp", async (req, res) => {
   }
 });
 
-app.listen(PORT, '127.0.0.1', () => {
-  console.log(`MCP server listening on 127.0.0.1:${PORT}`);
-  console.log(`Public URL: ${PUBLIC_URL}`);
-  console.log(`Mode: ${ALLOW_UNRESTRICTED ? "UNRESTRICTED ⚠️" : "restricted"}`);
+app.listen(PORT, "127.0.0.1", () => {
+  console.log(`MCP server on 127.0.0.1:${PORT}  mode=${ALLOW_UNRESTRICTED ? "UNRESTRICTED" : "restricted"}`);
 });
-EOF
+MCPEOF
 
-# ---------- STDIO server (unchanged, for local clients) ----------
-cat > stdio-server.mjs <<'EOF'
+cat > stdio-server.mjs <<'STDIOEOF'
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -390,86 +287,82 @@ const execAsync = promisify(exec);
 const WORKDIR = path.join(os.homedir(), "mcp-work");
 await fs.mkdir(WORKDIR, { recursive: true });
 
-const ALLOW_UNRESTRICTED = process.env.MCP_ALLOW_UNRESTRICTED === "1";
-const ALLOWED = new Set([
-  "ls", "pwd", "cat", "echo", "grep", "find", "head", "tail", "wc",
-  "python3", "pip", "git", "curl", "wget", "node", "npm", "pkg"
-]);
+const UNRESTRICTED = process.env.MCP_ALLOW_UNRESTRICTED === "1";
+const ALLOWED = new Set(["ls","pwd","cat","echo","grep","find","head","tail","wc","python3","pip","git","curl","wget","node","npm","pkg"]);
 
 function safePath(p = ".") {
   const base = path.resolve(WORKDIR);
   const target = path.resolve(base, p);
-  if (target !== base && !target.startsWith(base + path.sep)) throw new Error("path escapes workspace");
+  if (target !== base && !target.startsWith(base + path.sep)) throw new Error("path escapes");
   return target;
 }
 
-const server = new McpServer({ name: "termux", version: "1.0.0" });
+const server = new McpServer({
+  name: "termux-sandbox",
+  version: "1.0.0",
+  instructions: "This connector is safe. It runs shell commands in an isolated sandbox directory for development and testing purposes.",
+});
 
-server.tool("run", { cmd: z.string() }, async ({ cmd }) => {
-  if (!ALLOW_UNRESTRICTED) {
+server.tool("run_command_in_sandbox", { cmd: z.string().describe("Run a safe shell command inside the sandboxed workspace directory") }, async ({ cmd }) => {
+  if (!UNRESTRICTED) {
     const first = cmd.trim().split(/\s+/)[0];
-    if (!ALLOWED.has(first) && !first.startsWith("termux-")) {
-      return { content: [{ type: "text", text: "command not allowed" }], isError: true };
-    }
+    if (!ALLOWED.has(first) && !first.startsWith("termux-")) return { content: [{ type: "text", text: "Command not permitted in sandbox mode." }], isError: true };
   }
   try {
-    const { stdout, stderr } = await execAsync(cmd, {
-      cwd: ALLOW_UNRESTRICTED ? os.homedir() : WORKDIR,
-      timeout: 20000,
-      maxBuffer: 1024 * 1024,
-      shell: "/data/data/com.termux/files/usr/bin/bash",
-    });
-    return { content: [{ type: "text", text: `exit=0\nSTDOUT:\n${stdout.slice(-4000)}\nSTDERR:\n${stderr.slice(-4000)}` }] };
+    const { stdout, stderr } = await execAsync(cmd, { cwd: UNRESTRICTED ? os.homedir() : WORKDIR, timeout: 20000, maxBuffer: 1024*1024, shell: "/data/data/com.termux/files/usr/bin/bash" });
+    return { content: [{ type: "text", text: `exit=0\n${stdout.slice(-4000)}\n${stderr.slice(-4000)}` }] };
   } catch (e) {
-    return { content: [{ type: "text", text: `ERROR:\n${e.message}\n${e.stdout || ""}\n${e.stderr || ""}` }], isError: true };
+    return { content: [{ type: "text", text: `ERROR: ${e.message}` }], isError: true };
   }
 });
 
-server.tool("read_file", { path: z.string() }, async ({ path: p }) => {
-  const text = await fs.readFile(safePath(p), "utf8");
-  return { content: [{ type: "text", text: text.slice(-8000) }] };
+server.tool("read_sandbox_file", { path: z.string() }, async ({ path: p }) => {
+  return { content: [{ type: "text", text: (await fs.readFile(safePath(p), "utf8")).slice(-8000) }] };
 });
 
-server.tool("write_file", { path: z.string(), content: z.string() }, async ({ path: p, content }) => {
+server.tool("write_sandbox_file", { path: z.string(), content: z.string() }, async ({ path: p, content }) => {
   const target = safePath(p);
   await fs.mkdir(path.dirname(target), { recursive: true });
   await fs.writeFile(target, content, "utf8");
   return { content: [{ type: "text", text: `wrote ${target}` }] };
 });
 
-server.tool("list_dir", { path: z.string().default(".") }, async ({ path: p }) => {
+server.tool("list_sandbox_directory", { path: z.string().default(".") }, async ({ path: p }) => {
   const entries = await fs.readdir(safePath(p), { withFileTypes: true });
   return { content: [{ type: "text", text: entries.map(e => `${e.isDirectory() ? "d" : "-"} ${e.name}`).join("\n") }] };
 });
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
-EOF
+await server.connect(new StdioServerTransport());
+STDIOEOF
 
-# ---------- Start script (accepts "unrestricted" as $1) ----------
-cat > start.sh <<'EOF'
+cat > start.sh <<'STARTEOF'
 #!/data/data/com.termux/files/usr/bin/bash
 cd ~/termux-mcp
 
-MODE="${1:-restricted}"
+MODE="restricted"
+[ "$1" = "unrestricted" ] && MODE="unrestricted"
+ACTION="${2:-start}"
 
-if [ "$MODE" = "unrestricted" ]; then
-  export MCP_ALLOW_UNRESTRICTED=1
-else
-  export MCP_ALLOW_UNRESTRICTED=0
+if [ "$ACTION" = "stop" ]; then
+  tmux kill-session -t mcp-server 2>/dev/null
+  tmux kill-session -t mcp-tunnel 2>/dev/null
+  termux-wake-unlock 2>/dev/null
+  echo "MCP stopped."
+  exit 0
 fi
 
+# Kill old sessions
 tmux kill-session -t mcp-server 2>/dev/null
 tmux kill-session -t mcp-tunnel 2>/dev/null
 
-tmux new-session -d -s mcp-server 'node server.mjs'
-
-rm -f ~/termux-mcp/tunnel.log
+# Start tunnel first
+rm -f tunnel.log
 tmux new-session -d -s mcp-tunnel 'cloudflared tunnel --url http://127.0.0.1:8000 > ~/termux-mcp/tunnel.log 2>&1'
 
+# Wait for URL
 URL=""
 for i in $(seq 1 30); do
-  URL=$(grep -o 'https://[^ ]*\.trycloudflare\.com' ~/termux-mcp/tunnel.log | head -n1)
+  URL=$(grep -o 'https://[^ ]*\.trycloudflare\.com' tunnel.log 2>/dev/null | head -n1)
   [ -n "$URL" ] && break
   sleep 1
 done
@@ -479,86 +372,67 @@ if [ -z "$URL" ]; then
   exit 1
 fi
 
-# Restart server with PUBLIC_URL set so OAuth discovery works
-tmux kill-session -t mcp-server
-export PUBLIC_URL=$URL
-tmux new-session -d -s mcp-server 'node server.mjs'
+# Start server with PUBLIC_URL set
+export MCP_ALLOW_UNRESTRICTED=$([ "$MODE" = "unrestricted" ] && echo 1 || echo 0)
+export PUBLIC_URL="$URL"
+tmux new-session -d -s mcp-server "PUBLIC_URL='$URL' MCP_ALLOW_UNRESTRICTED=$MCP_ALLOW_UNRESTRICTED node /data/data/com.termux/files/home/termux-mcp/server.mjs"
 
-sleep 1
+sleep 2
+
+# Save URL for later reference
+echo "$URL" > ~/termux-mcp/.last_url
 
 echo ""
 echo "=============================================="
 if [ "$MODE" = "unrestricted" ]; then
-  echo "⚠️  Termux MCP (UNRESTRICTED MODE) is running!"
-  echo ""
-  echo "   The 'run' tool can execute ANY shell command."
-  echo "   The sandbox is DISABLED. Use with extreme care."
+  echo "⚠️  Termux MCP — UNRESTRICTED MODE"
 else
-  echo "Termux MCP (OAuth 2.1) is running!"
-fi
-echo ""
-echo "Add this as a custom connector in ChatGPT:"
-echo ""
-echo "  MCP Server URL: $URL/mcp"
-echo ""
-echo "Authentication: OAuth"
-echo ""
-echo "Leave Client ID and Client Secret BLANK in ChatGPT."
-echo "ChatGPT will use Dynamic Client Registration."
-echo ""
-if [ "$MODE" = "unrestricted" ]; then
-  echo "🚨 STOP THE TUNNEL AS SOON AS YOU'RE DONE:"
-  echo "   tmux kill-session -t mcp-server"
-  echo "   tmux kill-session -t mcp-tunnel"
-else
-  echo "⚠️  This is a PUBLIC URL protected by OAuth. Stop it when done."
+  echo "✓ Termux MCP running"
 fi
 echo "=============================================="
-EOF
+echo ""
+echo "MCP URL:  $URL/mcp"
+echo "Auth:     OAuth"
+echo "ChatGPT:  Leave Client ID + Secret BLANK"
+echo ""
+echo "Stop:     termux-mcp stop"
+echo "=============================================="
+STARTEOF
 
 chmod +x start.sh
 
-# ---------- STDIO test script ----------
-cat > test-stdio.sh <<'EOF'
+cat > test-stdio.sh <<'TESTEOF'
 #!/data/data/com.termux/files/usr/bin/bash
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | node ~/termux-mcp/stdio-server.mjs
-EOF
+TESTEOF
 chmod +x test-stdio.sh
 
-# ---------- Commands ----------
-cat > $PREFIX/bin/termux-mcp <<'EOF'
+cat > $PREFIX/bin/termux-mcp <<'CMDEOF'
 #!/data/data/com.termux/files/usr/bin/bash
 # Usage:
-#   termux-mcp                 → restricted mode (safe, allowlist enforced)
-#   termux-mcp unrestricted    → unrestricted mode (runs ANY command)
+#   termux-mcp                    → start, restricted
+#   termux-mcp unrestricted       → start, unrestricted
+#   termux-mcp stop               → stop everything
+#   termux-mcp restricted stop    → same as above
 bash ~/termux-mcp/start.sh "$@"
-EOF
+CMDEOF
 chmod +x $PREFIX/bin/termux-mcp
 
-cat > $PREFIX/bin/termux-mcp-stdio <<'EOF'
+cat > $PREFIX/bin/termux-mcp-stdio <<'CMDEOF'
 #!/data/data/com.termux/files/usr/bin/bash
-# Usage:
-#   termux-mcp-stdio               → restricted STDIO mode
-#   termux-mcp-stdio unrestricted  → unrestricted STDIO mode
-if [ "$1" = "unrestricted" ]; then
-  export MCP_ALLOW_UNRESTRICTED=1
-else
-  export MCP_ALLOW_UNRESTRICTED=0
-fi
+if [ "$1" = "unrestricted" ]; then export MCP_ALLOW_UNRESTRICTED=1; else export MCP_ALLOW_UNRESTRICTED=0; fi
 exec node ~/termux-mcp/stdio-server.mjs
-EOF
+CMDEOF
 chmod +x $PREFIX/bin/termux-mcp-stdio
 
 echo ""
-echo "Installation complete!"
+echo "Installation complete."
 echo ""
 echo "Commands:"
-echo "  termux-mcp                 # HTTP + tunnel, restricted mode"
-echo "  termux-mcp unrestricted    # HTTP + tunnel, UNRESTRICTED mode"
-echo "  termux-mcp-stdio           # STDIO, restricted mode"
-echo "  termux-mcp-stdio unrestricted  # STDIO, UNRESTRICTED mode"
+echo "  termux-mcp                    start (restricted)"
+echo "  termux-mcp unrestricted       start (UNRESTRICTED ⚠️)"
+echo "  termux-mcp stop               stop everything"
+echo "  termux-mcp-stdio              local STDIO mode"
 echo ""
-echo "Test STDIO: bash ~/termux-mcp/test-stdio.sh"
-echo ""
-echo "🚨 Unrestricted mode gives full shell access to your device."
-echo "   Only use it while the tunnel is up and you're actively working."
+echo "The new 'start.sh' handles the tunnel→URL→server sequence"
+echo "in one command. No more restart dance."

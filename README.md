@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/YOURUSER/termux-mcp/main/assets/banner.png" alt="Termux MCP banner" width="100%" />
+<img src="https://raw.githubusercontent.com/Calvin980/Chatgpt-plugin-mcp/main/assets/banner.png" alt="Termux MCP banner" width="100%" />
 
 # 🧠 Termux MCP
 
@@ -18,7 +18,7 @@ A lightweight [Model Context Protocol](https://modelcontextprotocol.io) server r
 [![Footprint](https://img.shields.io/badge/footprint-%3C500%20MB-blue?style=flat-square)](#-disk-usage)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](#-license)
 [![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)](#-contributing)
-[![Stars](https://img.shields.io/github/stars/YOURUSER/termux-mcp?style=flat-square)](https://github.com/YOURUSER/termux-mcp/stargazers)
+[![Stars](https://img.shields.io/github/stars/Calvin980/Chatgpt-plugin-mcp?style=flat-square)](https://github.com/Calvin980/Chatgpt-plugin-mcp/stargazers)
 
 <br />
 
@@ -135,4 +135,4 @@ The pitch: **the phone in your pocket is a perfectly good server** for personal-
 In Termux:
 
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/YOURUSER/termux-mcp/main/install.sh)
+bash <(curl -sL https://raw.githubusercontent.com/Calvin980/Chatgpt-plugin-mcp/main/install.sh)

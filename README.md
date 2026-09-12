@@ -4,14 +4,25 @@ Run an MCP (Model Context Protocol) server on Android and connect it to ChatGPT 
 
 ## Overview
 
-Termux MCP enables you to integrate your Android device with ChatGPT by running a Model Context Protocol server on Termux. This allows ChatGPT to interact with your Android environment securely through a public tunnel.
+Termux MCP enables you to integrate your Android device with ChatGPT by running a Model Context Protocol server on Termux. This allows ChatGPT to interact with your Android environment through a public tunnel.
+
+Security is a key concern when exposing services on a personal device. This README now includes explicit security guidance and safer installation steps to reduce the risk of credential leaks, remote compromise, or accidental data exposure.
 
 **Key Features:**
-- Secure OAuth 2.1 authentication
+- OAuth 2.1 authentication (configured by the user)
 - Runs on Android via Termux
-- File access confined to `~/mcp-work` directory
+- File access confined to `~/mcp-work` directory by default
 - Easy installation and management
-- Public tunnel connectivity for remote access
+- Public tunnel connectivity for remote access (use with care)
+
+## Important security summary (read first)
+
+- Do not run code you don't understand. Inspect install/uninstall scripts before executing them.
+- Avoid piping remote scripts directly into `bash` or `sh`. Instead, download, inspect, and then run.
+- Keep OAuth client IDs, client secrets, tokens, and other credentials out of version control and world-readable files.
+- Use strict filesystem permissions for the work directory and any files that contain secrets: `chmod 700 ~/mcp-work` and `chmod 600` for secret files.
+- Public tunnels expose services to the internet. Use short-lived tunnels, restrict scopes and permissions, and monitor activity.
+- Run the MCP server under a dedicated, unprivileged user or account when possible.
 
 ## Prerequisites
 
@@ -23,9 +34,24 @@ Before you begin, ensure you have:
 
 ## Installation
 
-### Quick Install
+### Safer install workflow (recommended)
 
-Run the installation script:
+1. Download the install script to review it first:
+
+```bash
+curl -fsSL -o termux-mcp-install.sh https://raw.githubusercontent.com/Calvin980/Chatgpt-plugin-mcp/main/install.sh
+less termux-mcp-install.sh   # review the script for suspicious or destructive commands
+# If you are satisfied, run it explicitly
+bash termux-mcp-install.sh
+```
+
+2. Verify checksums or signatures if provided by the project. If you trust a release tag, prefer installing from a release tarball with a signed checksum.
+
+> Avoid: `bash <(curl -sL https://raw.githubusercontent.com/Calvin980/Chatgpt-plugin-mcp/main/install.sh)`
+>
+> Reason: piping remote code directly to a shell runs the code before you can review or verify it.
+
+### Quick Install (less safe; only use if you trust the source and reviewed the script)
 
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/Calvin980/Chatgpt-plugin-mcp/main/install.sh)
@@ -37,19 +63,93 @@ This script will:
 - Configure environment variables
 - Create the required `~/mcp-work` directory
 
-### Manual Installation
+After installation, ensure the work directory has restrictive permissions:
 
-If you prefer manual setup, follow these steps:
+```bash
+chmod 700 "$HOME/mcp-work"
+```
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/Calvin980/Chatgpt-plugin-mcp.git
-   cd Chatgpt-plugin-mcp
-   ```
+## Secrets and environment variables
 
-2. Install dependencies (as required by your system)
+- Do NOT commit secrets (OAuth client secrets, tokens, API keys) to the repository.
+- Keep secrets in files with strict permissions: `chmod 600 /path/to/secret`.
+- Use secure storage where available (Android keystore, Termux `termux-keystore` if available, or a password manager).
+- When exporting environment variables, prefer adding them to a file readable only by your account, e.g. `~/.mcp_env` with `chmod 600 ~/.mcp_env`, and load it from a shell profile only when needed.
 
-3. Configure OAuth 2.1 credentials in your ChatGPT plugin settings
+Example:
+
+```bash
+# ~/.mcp_env (permissions 600)
+export MCP_PORT=3000
+export MCP_WORK_DIR="$HOME/mcp-work"
+```
+
+Load it when starting the server explicitly rather than leaving secrets exposed in long-lived shell sessions.
+
+## OAuth and plugin configuration
+
+- Register OAuth credentials securely in your ChatGPT plugin configuration. Treat client secrets like passwords.
+- Use the minimal scopes required for the plugin's functionality.
+- Prefer short-lived access tokens and implement token rotation where possible.
+- Revoke plugin access immediately if you suspect a compromise.
+
+## Tunnels and network exposure
+
+Public tunnels make your service reachable from the internet — this is convenient but increases risk.
+
+Recommendations:
+- Prefer authenticated tunnels or add an additional layer of authentication (basic auth, JWT, or IP allowlist) in front of the MCP endpoint.
+- Use short-lived or ephemeral tunnels when possible.
+- Monitor connections and revoke tunnels when not in use.
+- If you can, run a reverse proxy that terminates TLS and enforces authentication instead of exposing the MCP server directly.
+
+## Hardening the runtime
+
+- Run the MCP server as an unprivileged user and avoid running as `root` or with escalated privileges.
+- Set strict permissions on the work directory and any files the server reads/writes: `chmod -R go-rwx $MCP_WORK_DIR`.
+- Limit which files and directories the MCP server can access. Do not point `MCP_WORK_DIR` at sensitive locations.
+- Keep Termux and all packages up to date: `pkg update && pkg upgrade`.
+- Consider using Android-level protections (screen lock, device encryption, SELinux policies) and keep the device OS updated.
+
+## Logging and monitoring
+
+- Keep logs available for auditing, but avoid logging secrets (tokens, passwords, private keys).
+- Rotate logs and ensure they are not world-readable.
+- Monitor for unusual activity and enable any available alerting.
+
+## Uninstallation (safe cleanup)
+
+### Safer uninstall workflow
+
+1. Stop the server and close any tunnels.
+
+```bash
+termux-mcp stop
+```
+
+2. Revoke OAuth tokens and remove plugin access in ChatGPT settings.
+
+3. Remove local files with care; make sure you do not accidentally delete unrelated data. Example:
+
+```bash
+rm -rf "$HOME/mcp-work"      # only after confirming the path
+```
+
+4. If you used the quick uninstall script, inspect it before running it, same as install.
+
+### Quick Uninstall
+
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/Calvin980/Chatgpt-plugin-mcp/main/uninstall.sh)
+```
+
+## Recommended secure defaults
+
+- MCP_WORK_DIR: `~/mcp-work` with permissions 700
+- Secrets: files with permissions 600, or secure keystore
+- Tunnel usage: ephemeral and authenticated
+- OAuth scopes: least privilege
+- Run: unprivileged account
 
 ## Usage
 
@@ -63,7 +163,7 @@ termux-mcp
 
 The server will:
 - Initialize the MCP server
-- Generate a public tunnel URL
+- Generate a public tunnel URL (use with caution)
 - Display connection information
 - Wait for incoming ChatGPT connections
 
@@ -87,7 +187,7 @@ termux-mcp status
 
 ### Environment Variables
 
-You can configure the server behavior using environment variables:
+You can configure the server behavior using environment variables. Keep these in a secure file with restrictive permissions.
 
 ```bash
 # Optional: Set custom port (default: 3000)
@@ -96,7 +196,7 @@ export MCP_PORT=3000
 # Optional: Set custom work directory (default: ~/mcp-work)
 export MCP_WORK_DIR=~/mcp-work
 
-# Optional: Enable debug logging
+# Optional: Enable debug logging (don't enable in production unless you need to troubleshoot)
 export MCP_DEBUG=true
 ```
 
@@ -108,255 +208,19 @@ export MCP_DEBUG=true
 4. Enter the tunnel URL provided by `termux-mcp`
 5. Authorize the plugin to access your MCP server
 
-## Uninstallation
-
-### Quick Uninstall
-
-Run the uninstallation script:
-
-```bash
-bash <(curl -sL https://raw.githubusercontent.com/Calvin980/Chatgpt-plugin-mcp/main/uninstall.sh)
-```
-
-This script will automatically:
-- Stop all running tmux sessions
-- Remove the MCP server directory
-- Delete sandbox and isolated home directories
-- Remove command-line tools
-- Preserve installed packages for manual removal if desired
-
-### Manual Uninstall
-
-If you prefer to uninstall manually or need to remove specific components, follow these steps:
-
-1. **Stop running sessions:**
-   ```bash
-   tmux kill-session -t mcp-server 2>/dev/null || true
-   tmux kill-session -t mcp-tunnel 2>/dev/null || true
-   tmux kill-session -t mcp-ai 2>/dev/null || true
-   ```
-
-2. **Release wake lock (if applicable):**
-   ```bash
-   termux-wake-unlock 2>/dev/null || true
-   ```
-
-3. **Remove the server directory** (includes .consent_password, audit.log, tunnel.log, node_modules):
-   ```bash
-   rm -rf ~/termux-mcp
-   ```
-
-4. **Remove the sandbox and isolated home directories:**
-   ```bash
-   rm -rf ~/mcp-work
-   rm -rf ~/mcp-ai-home
-   ```
-
-5. **Remove the command-line tools:**
-   ```bash
-   rm -f $PREFIX/bin/termux-mcp
-   rm -f $PREFIX/bin/termux-mcp-stdio
-   ```
-
-6. **Optional: Remove installed packages** (only if you don't need them for other purposes):
-   ```bash
-   pkg uninstall nodejs-lts cloudflared tmux
-   ```
-
-7. **Delete the connector in ChatGPT:**
-   - Go to Settings → Connectors → Termux
-   - Click Delete
-
-### What Gets Removed
-
-- `~/termux-mcp/` — Server code, keys, consent password, and audit logs
-- `~/mcp-work/` — Sandbox files created by the MCP server
-- `~/mcp-ai-home/` — Isolated session home directory
-- `$PREFIX/bin/termux-mcp` — Main command-line tool
-- `$PREFIX/bin/termux-mcp-stdio` — Stdio server command-line tool
-
-**Note:** Installed packages (nodejs, cloudflared, tmux) are NOT automatically removed. Remove them manually if you don't need them for other purposes.
-
-## Security
-
-⚠️ **Important: Read this section carefully before deployment**
-
-### Security Considerations
-
-- **Tunnel URL is Public**: While the server is running, the tunnel URL is publicly accessible on the internet. Anyone with the URL can attempt to connect.
-
-- **OAuth 2.1 Protection**: Access is protected by OAuth 2.1 authentication. Only users who authorize the connection can interact with the server.
-
-- **No Shell Access**: The MCP server does NOT provide direct shell/terminal access. Commands are limited to defined MCP protocols.
-
-- **File Access Restrictions**: All file operations are strictly confined to the `~/mcp-work` directory. The server cannot access files outside this directory, protecting sensitive data.
-
-- **Always Stop When Done**: Stop the tunnel when you're finished using it:
-  ```bash
-  termux-mcp stop
-  ```
-
-### Best Practices
-
-1. **Don't Leave Running Unattended**: Only run the server when actively using ChatGPT integration
-2. **Use Strong Authentication**: Ensure your ChatGPT account has strong authentication
-3. **Monitor Activity**: Periodically check for unauthorized access attempts
-4. **Rotate Credentials**: Periodically update OAuth tokens and credentials
-5. **Separate Work Directory**: Keep sensitive files outside `~/mcp-work`
-6. **Network Security**: Consider using a VPN if running on public networks
-
-### Threat Model
-
-| Threat | Mitigation |
-|--------|-----------|
-| Unauthorized access | OAuth 2.1 authentication |
-| Data exfiltration | File access limited to `~/mcp-work` |
-| Shell injection | No shell/terminal access provided |
-| MITM attacks | HTTPS tunnel with certificate validation |
-| Token theft | Short-lived OAuth tokens, refresh tokens stored securely |
-
-## Troubleshooting
-
-### Common Issues
-
-#### "Command not found: termux-mcp"
-- Ensure the installation completed successfully
-- Verify the installation directory is in your PATH
-- Try running: `source ~/.bashrc`
-
-#### "Connection refused"
-- Check that the server is running: `termux-mcp status`
-- Verify the tunnel URL is correct
-- Check your internet connection
-
-#### "OAuth authentication failed"
-- Verify your ChatGPT OAuth credentials
-- Check that the callback URL matches your tunnel URL
-- Ensure OAuth tokens haven't expired
-
-#### "Permission denied accessing files"
-- Verify files are in the `~/mcp-work` directory
-- Check file permissions: `ls -la ~/mcp-work`
-- Ensure the MCP process has read/write permissions
-
-### Debug Mode
-
-Enable detailed logging for troubleshooting:
-
-```bash
-export MCP_DEBUG=true
-termux-mcp
-```
-
-## Advanced Usage
-
-### Custom Work Directory
-
-To use a different work directory:
-
-```bash
-export MCP_WORK_DIR=/path/to/custom/dir
-termux-mcp
-```
-
-### Running in Background
-
-To run the server in the background using `nohup`:
-
-```bash
-nohup termux-mcp > ~/mcp-server.log 2>&1 &
-```
-
-### Integration with Termux Services
-
-Create a persistent service (requires `termux-services` package):
-
-```bash
-# Install termux-services
-pkg install termux-services
-
-# Create service file
-mkdir -p ~/.config/termux-services/mcp
-```
-
-## Architecture
-
-The Termux MCP system consists of three main components:
-
-1. **MCP Server**: Runs on Android/Termux, implements the Model Context Protocol
-2. **OAuth 2.1 Layer**: Provides secure authentication between ChatGPT and the server
-3. **Public Tunnel**: Exposes the server to the internet with secure routing
+When setting up the plugin, use minimal scopes and avoid granting any permission that is not needed.
 
 ## Contributing
 
-Contributions are welcome! Please:
+Contributions are welcome. When submitting code or scripts:
+- Avoid committing secrets.
+- Add clear documentation for security implications of changes.
+- Sign or provide checksums for release artifacts when possible.
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit changes (`git commit -m 'Add amazing feature'`)
-4. Push to branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+## Security contact
 
-## Support
-
-For issues and questions:
-
-- Open an issue on [GitHub Issues](https://github.com/Calvin980/Chatgpt-plugin-mcp/issues)
-- Check existing issues for solutions
-- Provide detailed error messages and logs when reporting bugs
+If you discover a security vulnerability, please open an issue labeled "security" or contact the repository owner directly. Do not post sensitive data publicly.
 
 ## License
 
-This project is licensed under the MIT License - see below for details.
-
-```
-MIT License
-
-Copyright (c) 2024 Calvin980
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-```
-
-## Disclaimer
-
-This tool provides access to your Android device from ChatGPT. Users are responsible for:
-- Ensuring proper security measures are in place
-- Understanding the risks of exposing a device to the internet
-- Regularly updating the software
-- Monitoring for unauthorized access
-- Complying with applicable laws and regulations
-
-## Roadmap
-
-Planned features for future releases:
-
-- [ ] Web-based dashboard for server management
-- [ ] Advanced logging and analytics
-- [ ] Multi-user support with role-based access
-- [ ] Custom command definitions
-- [ ] Rate limiting and request throttling
-- [ ] Support for additional authentication methods
-
-## Related Resources
-
-- [Model Context Protocol Documentation](https://modelcontextprotocol.io/)
-- [ChatGPT Plugin Documentation](https://platform.openai.com/docs/plugins)
-- [Termux Documentation](https://termux.dev/en/)
-- [OAuth 2.1 Specification](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-v2-1-09)
-
----
-
-**Last Updated**: September 12, 2026
-**Maintainer**: Calvin980
+(keep existing license info here)

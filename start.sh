@@ -3,7 +3,6 @@ cd ~/termux-mcp
 
 TUNNEL_CONFIG=~/termux-mcp/.tunnel_config
 
-# Subcommands
 case "$1" in
   stop)
     tmux kill-session -t mcp-server 2>/dev/null
@@ -12,14 +11,17 @@ case "$1" in
     echo "MCP stopped."
     exit 0
     ;;
+
   audit)
     tail -n 50 ~/termux-mcp/audit.log 2>/dev/null || echo "(no audit log yet)"
     exit 0
     ;;
+
   password)
     cat ~/termux-mcp/.consent_password 2>/dev/null || echo "(no password set)"
     exit 0
     ;;
+
   tunnel)
     if [ -f "$TUNNEL_CONFIG" ]; then
       echo "Saved named tunnel:"
@@ -29,9 +31,129 @@ case "$1" in
     fi
     exit 0
     ;;
+
   forget-tunnel)
     rm -f "$TUNNEL_CONFIG"
     echo "Forgot saved named tunnel. (The Cloudflare tunnel itself still exists.)"
+    echo "To delete the Cloudflare tunnel too: termux-mcp delete-tunnel"
+    exit 0
+    ;;
+
+  tunnels)
+    if [ ! -f ~/.cloudflared/cert.pem ]; then
+      echo "Not logged in to Cloudflare. Run: cloudflared tunnel login"
+      exit 1
+    fi
+    echo ""
+    echo "Your Cloudflare tunnels:"
+    cloudflared tunnel list
+    echo ""
+    if [ -f "$TUNNEL_CONFIG" ]; then
+      echo "Locally saved:"
+      cat "$TUNNEL_CONFIG"
+    else
+      echo "No local tunnel config saved."
+    fi
+    exit 0
+    ;;
+
+  delete-tunnel)
+    if [ ! -f ~/.cloudflared/cert.pem ]; then
+      echo "Not logged in to Cloudflare. Run: cloudflared tunnel login"
+      exit 1
+    fi
+
+    echo ""
+    echo "Existing tunnels:"
+    cloudflared tunnel list 2>/dev/null || { echo "Failed to list tunnels."; exit 1; }
+    echo ""
+
+    SAVED_NAME=""
+    SAVED_HOST=""
+    if [ -f "$TUNNEL_CONFIG" ]; then
+      SAVED_NAME=$(grep '^name=' "$TUNNEL_CONFIG" | cut -d= -f2-)
+      SAVED_HOST=$(grep '^hostname=' "$TUNNEL_CONFIG" | cut -d= -f2-)
+      echo "Saved tunnel in config: $SAVED_NAME ($SAVED_HOST)"
+      echo ""
+    fi
+
+    printf "Tunnel name to delete (or 'cancel'): "
+    read -r DEL_NAME
+    [ "$DEL_NAME" = "cancel" ] && echo "Cancelled." && exit 0
+    [ -z "$DEL_NAME" ] && { echo "No name given."; exit 1; }
+
+    echo ""
+    echo "This will:"
+    echo "  1. Delete the tunnel '$DEL_NAME' from Cloudflare"
+    echo "  2. Remove its DNS route"
+    echo "  3. Remove local credentials and config"
+    echo ""
+    printf "Type the tunnel name again to confirm: "
+    read -r CONFIRM
+    [ "$CONFIRM" != "$DEL_NAME" ] && { echo "Names don't match. Aborted."; exit 1; }
+
+    if tmux has-session -t mcp-tunnel 2>/dev/null; then
+      tmux kill-session -t mcp-tunnel
+      echo "Stopped running tunnel session."
+    fi
+
+    if [ -n "$SAVED_HOST" ] && [ "$SAVED_NAME" = "$DEL_NAME" ]; then
+      echo "Note: the DNS record $SAVED_HOST may still exist in Cloudflare."
+      echo "      Delete it from the Cloudflare dashboard if you need to."
+    fi
+
+    echo "Deleting tunnel: $DEL_NAME"
+    if cloudflared tunnel delete "$DEL_NAME"; then
+      echo "  deleted"
+    else
+      echo "  failed (it may already be gone)"
+    fi
+
+    CREDS=~/.cloudflared/$DEL_NAME.json
+    if [ -f "$CREDS" ]; then
+      rm -f "$CREDS"
+      echo "  removed credentials: $CREDS"
+    fi
+
+    if [ -f "$TUNNEL_CONFIG" ] && [ "$SAVED_NAME" = "$DEL_NAME" ]; then
+      rm -f "$TUNNEL_CONFIG"
+      echo "  removed local config"
+    fi
+
+    echo ""
+    echo "Done. Set up a new tunnel with: termux-mcp"
+    exit 0
+    ;;
+
+  delete-all-tunnels)
+    if [ ! -f ~/.cloudflared/cert.pem ]; then
+      echo "Not logged in to Cloudflare. Run: cloudflared tunnel login"
+      exit 1
+    fi
+
+    echo ""
+    echo "Existing tunnels:"
+    cloudflared tunnel list 2>/dev/null
+    echo ""
+
+    printf "Type 'DELETE ALL' to remove every tunnel and its credentials: "
+    read -r CONFIRM
+    [ "$CONFIRM" != "DELETE ALL" ] && { echo "Aborted."; exit 1; }
+
+    tmux kill-session -t mcp-tunnel 2>/dev/null
+
+    echo ""
+    echo "Deleting all tunnels..."
+    cloudflared tunnel list -o json 2>/dev/null | grep -o '"name":"[^"]*"' | cut -d'"' -f4 | while read -r name; do
+      [ -z "$name" ] && continue
+      echo "  deleting: $name"
+      cloudflared tunnel delete "$name" 2>/dev/null || echo "    (failed, skipping)"
+      rm -f ~/.cloudflared/"$name".json
+    done
+
+    rm -f "$TUNNEL_CONFIG"
+    echo ""
+    echo "Done. All tunnels removed."
     exit 0
     ;;
 esac
@@ -208,9 +330,12 @@ echo "In ChatGPT: leave Client ID and Secret blank."
 echo "On the approve page: enter the password above."
 echo ""
 echo "Commands:"
-echo "  termux-mcp stop            kill everything"
-echo "  termux-mcp audit           show recent activity"
-echo "  termux-mcp password        show consent password"
-echo "  termux-mcp tunnel          show saved named tunnel"
-echo "  termux-mcp forget-tunnel   forget the saved tunnel"
+echo "  termux-mcp stop                kill everything"
+echo "  termux-mcp audit               show recent activity"
+echo "  termux-mcp password            show consent password"
+echo "  termux-mcp tunnel              show saved named tunnel"
+echo "  termux-mcp forget-tunnel       forget the saved tunnel"
+echo "  termux-mcp tunnels             list Cloudflare tunnels"
+echo "  termux-mcp delete-tunnel       delete a named tunnel"
+echo "  termux-mcp delete-all-tunnels  delete every tunnel"
 echo "=============================================="

@@ -1,105 +1,103 @@
 #!/data/data/com.termux/files/usr/bin/bash
-cd ~/termux-mcp
+set -e
 
-case "$1" in
-  stop)
-    tmux kill-session -t mcp-server 2>/dev/null
-    tmux kill-session -t mcp-tunnel 2>/dev/null
-    tmux kill-session -t mcp-ai 2>/dev/null
-    termux-wake-unlock 2>/dev/null
-    echo "MCP stopped."
-    exit 0
+REPO="https://raw.githubusercontent.com/Calvin980/Chatgpt-plugin-mcp/main"
+
+echo ""
+echo "=============================================="
+echo "  Termux MCP Installer"
+echo "=============================================="
+echo ""
+echo "Before installing, we can speed up package"
+echo "downloads by switching to faster Termux mirrors."
+echo ""
+echo "This runs a third-party script from:"
+echo "  github.com/rugved-danej/termux-best-mirror"
+echo ""
+printf "Run mirror setup? [y/N]: "
+read -r MIRROR_ANSWER
+
+case "$MIRROR_ANSWER" in
+  y|Y|yes|YES|Yes)
+    echo ""
+    echo "Setting up faster mirrors..."
+    bash <(curl -sL https://raw.githubusercontent.com/rugved-danej/termux-best-mirror/main/install.sh)
+    echo ""
+    echo "Applying mirrors..."
+    termux-best-mirror
+    echo ""
+    echo "Mirrors configured."
+    echo ""
     ;;
-
-  audit)
-    tail -n 50 ~/termux-mcp/audit.log 2>/dev/null || echo "(no audit log yet)"
-    exit 0
-    ;;
-
-  password)
-    cat ~/termux-mcp/.consent_password 2>/dev/null || echo "(no password set)"
-    exit 0
-    ;;
-
-  panic)
-    echo "Killing everything..."
-    tmux kill-session -t mcp-server 2>/dev/null
-    tmux kill-session -t mcp-tunnel 2>/dev/null
-    tmux kill-session -t mcp-ai 2>/dev/null
-    termux-wake-unlock 2>/dev/null
-    rm -f ~/termux-mcp/.unlocked_until
-    echo "All sessions killed. OAuth tokens are gone."
-    exit 0
-    ;;
-
-  unlock)
-    MIN="${2:-5}"
-    if ! echo "$MIN" | grep -qE '^[0-9]+$'; then
-      echo "Usage: termux-mcp unlock [minutes]"
-      exit 1
-    fi
-    UNTIL_MS=$(( ($(date +%s) + MIN * 60) * 1000 ))
-    echo "$UNTIL_MS" > ~/termux-mcp/.unlocked_until
-    echo "Unlocked for $MIN minute(s)."
-    exit 0
-    ;;
-
-  lock)
-    rm -f ~/termux-mcp/.unlocked_until
-    echo "Locked."
-    exit 0
+  *)
+    echo "Skipping mirror setup. Using default mirrors."
+    echo ""
     ;;
 esac
 
-MODE="restricted"
-[ "$1" = "unrestricted" ] && MODE="unrestricted"
+echo "Updating packages..."
+pkg update -y && pkg upgrade -y
 
-mkdir -p ~/mcp-work ~/mcp-ai-home
-tmux kill-session -t mcp-server 2>/dev/null
-tmux kill-session -t mcp-tunnel 2>/dev/null
-rm -f tunnel.log
+echo "Installing dependencies..."
+pkg install -y nodejs-lts cloudflared tmux || pkg install -y nodejs cloudflared tmux
 
-echo ""
-echo "Starting quick tunnel..."
-tmux new-session -d -s mcp-tunnel 'cloudflared tunnel --url http://127.0.0.1:8000 > ~/termux-mcp/tunnel.log 2>&1'
+mkdir -p ~/termux-mcp ~/mcp-work ~/mcp-ai-home
+cd ~/termux-mcp
 
-URL=""
-for i in $(seq 1 30); do
-  URL=$(grep -o 'https://[^ ]*\.trycloudflare\.com' tunnel.log 2>/dev/null | head -n1)
-  [ -n "$URL" ] && break
-  sleep 1
-done
+echo "Initializing npm project..."
+npm init -y >/dev/null
+npm install @modelcontextprotocol/sdk express zod jose --save-exact >/dev/null
 
-if [ -z "$URL" ]; then
-  echo "Failed to get tunnel URL. Check ~/termux-mcp/tunnel.log"
-  exit 1
+echo "Downloading server files..."
+curl -fsSL "$REPO/server.mjs"       -o server.mjs
+curl -fsSL "$REPO/stdio-server.mjs" -o stdio-server.mjs
+curl -fsSL "$REPO/start.sh"         -o start.sh
+curl -fsSL "$REPO/test-stdio.sh"    -o test-stdio.sh 2>/dev/null || true
+chmod +x start.sh
+[ -f test-stdio.sh ] && chmod +x test-stdio.sh
+
+if [ ! -f .consent_password ]; then
+  head -c 12 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 16 > .consent_password
+  chmod 600 .consent_password
+  echo ""
+  echo "=============================================="
+  echo "  CONSENT PASSWORD: $(cat .consent_password)"
+  echo ""
+  echo "  Write this down."
+  echo "  You'll need it to approve the connector"
+  echo "  in ChatGPT."
+  echo "=============================================="
+  echo ""
 fi
 
-export MCP_ALLOW_UNRESTRICTED=$([ "$MODE" = "unrestricted" ] && echo 1 || echo 0)
-tmux new-session -d -s mcp-server "PUBLIC_URL='$URL' MCP_ALLOW_UNRESTRICTED=$MCP_ALLOW_UNRESTRICTED node /data/data/com.termux/files/home/termux-mcp/server.mjs"
-sleep 2
-echo "$URL" > ~/termux-mcp/.last_url
+cat > $PREFIX/bin/termux-mcp <<'CMDEOF'
+#!/data/data/com.termux/files/usr/bin/bash
+bash ~/termux-mcp/start.sh "$@"
+CMDEOF
+chmod +x $PREFIX/bin/termux-mcp
+
+cat > $PREFIX/bin/termux-mcp-stdio <<'CMDEOF'
+#!/data/data/com.termux/files/usr/bin/bash
+exec node ~/termux-mcp/stdio-server.mjs
+CMDEOF
+chmod +x $PREFIX/bin/termux-mcp-stdio
 
 echo ""
 echo "=============================================="
-if [ "$MODE" = "unrestricted" ]; then
-  echo "⚠️  Termux MCP — UNRESTRICTED MODE"
-else
-  echo "✓ Termux MCP running (restricted)"
-fi
+echo "  Installation complete."
 echo "=============================================="
-echo "MCP URL:   $URL/mcp"
-echo "Auth:      OAuth + consent password"
-echo "Password:  $(cat ~/termux-mcp/.consent_password 2>/dev/null || echo '(none)')"
-echo ""
-echo "In ChatGPT: leave Client ID and Secret blank."
-echo "On the approve page: enter the password above."
 echo ""
 echo "Commands:"
-echo "  termux-mcp stop        kill everything"
-echo "  termux-mcp panic       kill everything + clear unlock"
-echo "  termux-mcp unlock [n]  allow mutating tools for n minutes"
-echo "  termux-mcp lock        lock immediately"
-echo "  termux-mcp audit       show recent activity"
-echo "  termux-mcp password    show consent password"
-echo "=============================================="
+echo "  termux-mcp                    start (restricted)"
+echo "  termux-mcp unrestricted       start (full access)"
+echo "  termux-mcp stop               stop"
+echo "  termux-mcp unlock [n]         allow mutating tools"
+echo "  termux-mcp lock               lock immediately"
+echo "  termux-mcp panic              emergency kill"
+echo "  termux-mcp audit              show recent activity"
+echo "  termux-mcp password           show consent password"
+echo "  termux-mcp-stdio              local STDIO mode"
+echo ""
+echo "Get started:"
+echo "  termux-mcp"
+echo ""

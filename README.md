@@ -102,6 +102,22 @@ Before you begin, ensure you have:
 
 ---
 
+## Quick Install & Uninstall
+
+### Quick Install (One Command)
+
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/Calvin980/Chatgpt-plugin-mcp/main/install.sh)
+```
+
+### Quick Uninstall (One Command)
+
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/Calvin980/Chatgpt-plugin-mcp/main/uninstall.sh)
+```
+
+---
+
 ## Installation
 
 ### Step 1: Download and Inspect

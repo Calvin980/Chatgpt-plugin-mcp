@@ -2,41 +2,149 @@
 
 Run an MCP (Model Context Protocol) server on Android and connect it to ChatGPT via OAuth 2.1.
 
-## Overview
+## What This Project Does
 
-Termux MCP enables you to integrate your Android device with ChatGPT by running a Model Context Protocol server on Termux. This allows ChatGPT to interact with your Android environment through a secure OAuth 2.1 tunnel.
+**Termux MCP** lets you connect your Android device to ChatGPT through a secure tunnel. ChatGPT can then:
+- Execute commands on your Android device
+- Read and write files in a sandboxed directory
+- List and launch apps
+- Access system information (CPU, disk, uptime)
+- Run interactive sessions via tmux
 
-**Key Features:**
-- OAuth 2.1 authentication (configured by the user)
-- Runs on Android via Termux
-- File access confined to `~/mcp-work` directory by default
-- Easy installation and management
-- Public tunnel connectivity for remote access (use with care)
+All communication is protected by OAuth 2.1 authentication and runs in a restricted sandbox by default.
+
+### Real-World Example
+
+1. You start the Termux MCP server on your Android phone via Termux
+2. The server generates a unique public tunnel URL (via Cloudflared)
+3. You configure ChatGPT with this URL
+4. ChatGPT requests access; you approve by entering a consent password
+5. ChatGPT can now run tools like `read_file`, `write_file`, `list_dir`, or execute shell commands in an isolated session
+6. All requests are logged in an audit file for review
+
+### Key Features
+
+- **OAuth 2.1 authentication** — User-configured, consent-based
+- **Runs on Android via Termux** — Turns your phone into a server
+- **Sandboxed file access** — Confined to `~/mcp-work` by default
+- **Audit logging** — Every action is recorded and timestamped
+- **Restricted mode** (default) — ChatGPT can only access allowed tools and directories
+- **Unrestricted mode** (optional) — Full command execution (use with caution)
+- **Easy install and management** — Single script, simple CLI commands
 
 ---
 
-## ⚠️ Critical Security Notice (Read First)
+## ⚠️ Critical Security Notice (Read This First)
 
-Security is a top concern when exposing services on a personal device. **Do not skip this section.**
+Security is a top concern when exposing services on a personal device. This section is intentionally at the top.
 
-### Before You Install
+### Before You Install — Three Golden Rules
 
-- **Inspect scripts before running**: Download, review, and verify the install script—never pipe remote scripts directly into bash.
-- **Never commit secrets**: OAuth credentials, tokens, API keys must never be in version control.
-- **File permissions matter**: Use `chmod 700 ~/mcp-work` and `chmod 600` for files containing secrets.
-- **Public tunnels = internet exposure**: Short-lived tunnels, restricted scopes, and monitoring are essential.
-- **Run unprivileged**: Avoid running the MCP server as root or with escalated privileges.
+1. **Download and inspect the install script first**
+   ```bash
+   curl -fsSL -o termux-mcp-install.sh https://raw.githubusercontent.com/Calvin980/Chatgpt-plugin-mcp/main/install.sh
+   less termux-mcp-install.sh   # review before running
+   bash termux-mcp-install.sh
+   ```
+   Never use: `bash <(curl -sL https://...)`
 
-### Key Security Principles
+2. **Keep secrets out of version control**
+   - OAuth client secrets, tokens, API keys must never be committed
+   - Store in files with `chmod 600` permissions
+   - Use environment files or Android keystore
 
-| Concern | Best Practice |
-|---------|---|
-| **Code Review** | Download install script first: `curl -fsSL -o termux-mcp-install.sh https://...` then review with `less termux-mcp-install.sh` before running |
-| **Credentials** | Store in files with `chmod 600`; never export to long-lived shell sessions; use Android keystore if available |
-| **OAuth Scopes** | Use least privilege: only request scopes your plugin actually needs |
-| **Tunnel Access** | Prefer authenticated tunnels; add IP allowlists or JWT auth in front of MCP endpoint |
-| **Permissions** | `chmod 700 ~/mcp-work` (directory), `chmod 600` (secret files), `chmod -R go-rwx $MCP_WORK_DIR` (entire tree) |
-| **Monitoring** | Keep audit logs; rotate logs regularly; avoid logging secrets |
+3. **Public tunnels expose to the internet**
+   - Use short-lived tunnels; stop when not needed
+   - Monitor audit logs regularly
+   - Restrict OAuth scopes to what you actually need
+
+### Security Checklist
+
+| Task | Command | Why |
+|------|---------|-----|
+| **Secure work directory** | `chmod 700 ~/mcp-work` | Only your user can access |
+| **Secure secret files** | `chmod 600 ~/.mcp_env` | Prevents other users from reading |
+| **Secure entire tree** | `chmod -R go-rwx $MCP_WORK_DIR` | Removes all group/other permissions |
+| **Review audit logs** | `termux-mcp audit` | Detect unauthorized access |
+| **Stop when not using** | `termux-mcp stop` | Closes tunnel, reduces exposure |
+| **Avoid root** | Run as unprivileged user | Limits damage if compromised |
+| **Keep Termux updated** | `pkg update && pkg upgrade` | Patches security vulnerabilities |
+
+---
+
+## How It Works Under the Hood
+
+### Architecture
+
+```
+ChatGPT (via plugin)
+    ↓ (OAuth 2.1 + Bearer token)
+Cloudflared Tunnel (public HTTPS)
+    ↓ (reverse proxy)
+Termux MCP Server (127.0.0.1:8000)
+    ├─ OAuth endpoints (/authorize, /token, /register)
+    ├─ MCP endpoint (/mcp)
+    ├─ Rate limiting (per IP)
+    ├─ Audit logging
+    └─ Tool execution (isolated tmux session)
+    ↓
+Android Device (Termux)
+    ├─ ~/mcp-work/ (sandboxed files)
+    ├─ mcp-ai-home/ (isolated session home)
+    └─ Restricted commands (no root access by default)
+```
+
+### The Install Script Does This
+
+The `install.sh` script performs these steps automatically:
+
+1. **Install dependencies**: Node.js (LTS), Cloudflared (tunneling), tmux (session management)
+2. **Set up directory structure**:
+   ```
+   ~/termux-mcp/           ← MCP server code and configs
+   ~/mcp-work/             ← Default sandbox for file operations
+   ~/mcp-ai-home/          ← Isolated home for ChatGPT sessions
+   ```
+3. **Generate OAuth consent password**: Stored in `~/.consent_password` (permissions 600)
+4. **Create server code**: Embeds `server.mjs` (HTTP + OAuth + MCP tools) and `stdio-server.mjs` (STDIO mode)
+5. **Install CLI commands**: `termux-mcp`, `termux-mcp-stdio` in `$PREFIX/bin`
+6. **Set permissions**: Makes scripts executable, work directory restrictive
+
+### How OAuth Works
+
+1. **Client registration** — ChatGPT registers itself with the MCP server, gets a `client_id`
+2. **Authorization request** — ChatGPT redirects you to `/authorize` with a code challenge (PKCE)
+3. **User approval** — You enter your consent password to approve access
+4. **Authorization code** — Server redirects back to ChatGPT with a time-limited code
+5. **Token exchange** — ChatGPT exchanges the code for an access token (Bearer token)
+6. **Authenticated requests** — ChatGPT uses the token to call MCP tools; server validates on each request
+
+Each token expires after 30 minutes. ChatGPT must request a new token to continue.
+
+### Sandbox Isolation
+
+- **File operations** are confined to `~/mcp-work/`; paths outside are rejected
+- **Allowed file extensions** (default): `.txt`, `.md`, `.json`, `.csv`, `.log`, `.yaml`, `.yml`, `.toml`, `.ini`, `.conf`, `.html`, `.css`, `.xml`, `.svg`
+- **File size limit** (default): 128 KB per write
+- **Shebang protection**: Scripts starting with `#!` are rejected
+- **Session isolation** (restricted mode): ChatGPT runs in a dedicated tmux session with its own home directory, isolated from your main shell environment
+
+### Available Tools
+
+| Tool | What It Does | Restricted Mode | Unrestricted Mode |
+|------|---|---|---|
+| `whoami` | Show current user | ✓ | ✓ |
+| `pwd` | Show work directory | ✓ | ✓ |
+| `date` | Show system time | ✓ | ✓ |
+| `system_info` | CPU, uptime, disk | ✓ | ✓ |
+| `list_apps` | List installed Android apps | ✓ | ✓ |
+| `open_app` | Launch an app by package name | ✓ | ✓ |
+| `list_dir` | List files in `~/mcp-work/` | ✓ | ✓ |
+| `read_file` | Read file in `~/mcp-work/` | ✓ | ✓ |
+| `write_file` | Write/create file in `~/mcp-work/` | ✓ | ✓ |
+| `append_file` | Append to file in `~/mcp-work/` | ✓ | ✓ |
+| `tmux` (isolated) | Run commands in isolated session | ✓ | ✓ |
+| `tmux` (any session) | Access other tmux sessions | ✗ | ✓ |
 
 ---
 
@@ -53,14 +161,14 @@ Before you begin, ensure you have:
 
 ## Installation
 
-### Step 1: Download and Inspect the Install Script (Recommended)
+### Step 1: Download and Inspect the Install Script
 
 ```bash
 curl -fsSL -o termux-mcp-install.sh https://raw.githubusercontent.com/Calvin980/Chatgpt-plugin-mcp/main/install.sh
 less termux-mcp-install.sh   # review the script for suspicious or destructive commands
 ```
 
-If you are satisfied with the script, proceed to Step 2.
+Look for any commands that seem destructive or suspicious. If you are satisfied, proceed to Step 2.
 
 ### Step 2: Run the Install Script
 
@@ -72,8 +180,9 @@ This script will:
 - Update and upgrade Termux packages
 - Install Node.js, Cloudflared (tunnel), and tmux
 - Download and configure the MCP server code
-- Create the required `~/mcp-work` directory
+- Create the required `~/mcp-work` and `~/mcp-ai-home` directories
 - Generate a consent password for OAuth approval
+- Install CLI commands (`termux-mcp`, `termux-mcp-stdio`)
 
 ### Step 3: Secure the Work Directory
 
@@ -83,15 +192,15 @@ chmod 700 "$HOME/mcp-work"
 
 This ensures only your user can read, write, or execute files in the work directory.
 
-### Quick Install (Less Safe)
+### Quick Install (Less Safe; Only if You Trust the Source)
 
-If you trust the source and have reviewed the script above, you can pipe directly:
+If you have reviewed the script and trust the source, you can pipe directly:
 
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/Calvin980/Chatgpt-plugin-mcp/main/install.sh)
 ```
 
-**⚠️ Note**: This bypasses the review step and runs code immediately. Use only if you have confirmed the script is safe.
+**⚠️ Note**: This bypasses the review step and runs code immediately. Only use if you have confirmed the script is safe.
 
 ---
 
@@ -99,86 +208,92 @@ bash <(curl -sL https://raw.githubusercontent.com/Calvin980/Chatgpt-plugin-mcp/m
 
 ### Storing Credentials Safely
 
-- Do NOT commit secrets to the repository or push them to public branches.
-- Keep secrets in files with strict permissions: `chmod 600 /path/to/secret`.
-- Use secure storage where available:
+- **Do NOT commit secrets** to the repository or push them to public branches.
+- **Keep secrets in restricted files**: `chmod 600 /path/to/secret`
+- **Preferred secure storage**:
   - Android keystore
   - Termux `termux-keystore` (if available)
-  - A dedicated password manager
+  - Dedicated password manager
+  - Encrypted files (beyond scope of this project)
 
 ### Loading Environment Variables Securely
 
 Create a secure secrets file:
 
 ```bash
-# ~/.mcp_env (permissions 600)
-export MCP_PORT=3000
+# ~/.mcp_env (keep this file secret!)
+export MCP_PORT=8000
 export MCP_WORK_DIR="$HOME/mcp-work"
 export OAUTH_CLIENT_ID="your-client-id"
 export OAUTH_CLIENT_SECRET="your-client-secret"
 ```
 
-Set permissions:
+Set restrictive permissions:
 ```bash
 chmod 600 ~/.mcp_env
 ```
 
-Load it when starting the server:
+Load it explicitly when starting the server:
 ```bash
 source ~/.mcp_env
 termux-mcp
 ```
 
-**Why?** Exporting secrets into long-lived shell sessions or shell profiles exposes them to process inspection and history files.
+**Why?** Exporting secrets into long-lived shell sessions or shell profiles exposes them to:
+- Process inspection (`ps aux`)
+- Shell history files
+- Other users on shared systems
 
 ---
 
 ## OAuth and Plugin Configuration
 
-- **Register securely**: Store OAuth client secrets like passwords—never in plain text files readable by others.
-- **Minimal scopes**: Request only the scopes your plugin needs, not everything available.
-- **Short-lived tokens**: Prefer access tokens with short TTL and implement token rotation.
-- **Revoke immediately**: If you suspect a compromise, revoke plugin access in ChatGPT settings.
+- **Client secrets are passwords** — Treat them with the same security as passwords
+- **Minimal scopes required** — Request only the scopes your plugin needs, not everything available
+- **Short-lived tokens** — This server uses 30-minute access tokens; implement token rotation if needed
+- **Revoke immediately** — If you suspect a compromise, revoke plugin access in ChatGPT settings and regenerate credentials
 
 ---
 
 ## Tunnels and Network Exposure
 
-Public tunnels make your MCP service reachable from the internet — convenient but higher risk.
+Public tunnels make your MCP service reachable from the internet — this is convenient but increases risk.
 
 ### Safe Tunnel Practices
 
-- **Prefer authenticated tunnels** or add an additional layer (basic auth, JWT, or IP allowlist).
-- **Use short-lived tunnels**: Create tunnels only when needed; revoke when done.
-- **Monitor connections**: Review audit logs for unusual activity.
-- **Reverse proxy**: If possible, run a reverse proxy (e.g., Nginx) that terminates TLS and enforces authentication instead of exposing MCP directly.
+- **Prefer authenticated tunnels** — Add an additional layer: basic auth, JWT validation, or IP allowlists in front of MCP
+- **Use short-lived tunnels** — Create tunnels only when actively using ChatGPT; stop them when done
+- **Monitor activity** — Review audit logs for unusual access patterns
+- **Run a reverse proxy** (if possible) — Use Nginx or similar to terminate TLS, enforce authentication, and rate-limit before traffic reaches MCP
 
-### Cloudflared Tunnel
+### Cloudflared Tunnel (Default)
 
-The install script uses Cloudflared to create a public tunnel. Each tunnel URL is unique and time-limited.
+The install script uses Cloudflared to create a public tunnel:
 
 ```bash
-# View the tunnel URL and status
-termux-mcp status
+# View the current tunnel URL and check status
+cat ~/termux-mcp/.last_url
+
+# View recent audit activity
+termux-mcp audit
 
 # Stop the tunnel
 termux-mcp stop
-
-# View recent activity
-termux-mcp audit
 ```
+
+Each tunnel is unique and ephemeral. When you stop the server, the URL is no longer accessible.
 
 ---
 
 ## Hardening the Runtime
 
-1. **Run unprivileged**: Never run as `root` or with `sudo`.
+1. **Run unprivileged** — Never run the MCP server as `root` or with `sudo`
 2. **Strict directory permissions**:
    ```bash
    chmod 700 "$MCP_WORK_DIR"
    chmod -R go-rwx "$MCP_WORK_DIR"
    ```
-3. **Limit file access**: Do not point `MCP_WORK_DIR` at sensitive locations (e.g., `/data/data/...` or your home directory).
+3. **Limit file access** — Do not point `MCP_WORK_DIR` at sensitive locations (e.g., `/data/data/...` or your home directory)
 4. **Keep Termux updated**:
    ```bash
    pkg update && pkg upgrade
@@ -192,31 +307,41 @@ termux-mcp audit
 
 ## Logging and Monitoring
 
-- **Enable audit logs**: The server creates an audit log at `~/termux-mcp/audit.log`.
-- **Avoid logging secrets**: Tokens, passwords, and private keys must never appear in logs.
-- **Rotate logs**: Clean up old logs regularly to prevent disk space issues.
-- **Monitor regularly**: Check audit logs for unusual activity:
+- **Audit logs** — Every MCP request is logged to `~/termux-mcp/audit.log`
+- **Avoid logging secrets** — Tokens, passwords, and private keys must never appear in logs
+- **Rotate logs regularly** — Clean up old logs to prevent disk space issues
+- **Monitor for suspicious activity**:
   ```bash
-  termux-mcp audit
+  termux-mcp audit        # view last 50 entries
+  tail -f ~/termux-mcp/audit.log   # stream in real-time
   ```
 
 ---
 
 ## Usage
 
-### Starting the Server (Restricted Mode)
+### Starting the Server (Restricted Mode — Default)
 
 ```bash
 termux-mcp
 ```
 
 The server will:
-- Initialize the MCP server
+- Initialize the MCP server on `127.0.0.1:8000`
 - Create a public tunnel via Cloudflared
-- Generate a unique tunnel URL
-- Display connection information
-- Wait for incoming ChatGPT connections
+- Generate a unique tunnel URL (e.g., `https://xxxxx.trycloudflare.com`)
 - Log all activity to the audit file
+- Wait for incoming ChatGPT connections
+
+Output:
+```
+============================================
+✓ Termux MCP running (restricted)
+============================================
+MCP URL:  https://xxxxx.trycloudflare.com/mcp
+Auth:     OAuth + consent password
+Password: abc123def456
+```
 
 ### Starting the Server (Unrestricted Mode)
 
@@ -224,7 +349,7 @@ The server will:
 termux-mcp unrestricted
 ```
 
-**⚠️ Warning**: Unrestricted mode allows ChatGPT to run arbitrary commands. Use only if you trust the source and understand the risks.
+**⚠️ Warning**: Unrestricted mode allows ChatGPT to run arbitrary commands and access any tmux session. Use only if you fully understand the risks.
 
 ### Stopping the Server
 
@@ -232,26 +357,32 @@ termux-mcp unrestricted
 termux-mcp stop
 ```
 
-This gracefully stops the MCP server and closes all tunnels.
+This gracefully stops the MCP server and closes all tunnels. The tunnel URL becomes inaccessible.
 
 ### Viewing Server Status
 
 ```bash
-termux-mcp status
+cat ~/termux-mcp/.last_url      # show the tunnel URL
+ps aux | grep node              # check if server is running
 ```
 
 ### Viewing Audit Logs
 
 ```bash
-termux-mcp audit
+termux-mcp audit                # show last 50 entries
+tail -n 100 ~/termux-mcp/audit.log   # show last 100 entries
+tail -f ~/termux-mcp/audit.log  # stream entries in real-time
 ```
-
-Shows the last 50 audit entries.
 
 ### Retrieving the Consent Password
 
 ```bash
 termux-mcp password
+```
+
+Or view directly:
+```bash
+cat ~/termux-mcp/.consent_password
 ```
 
 ---
@@ -274,19 +405,25 @@ export MCP_DEBUG=true
 
 # Optional: Unrestricted mode (1 = unrestricted, 0 = restricted)
 export MCP_ALLOW_UNRESTRICTED=0
+
+# Optional: Set public URL (useful behind proxies)
+export PUBLIC_URL="https://your-domain.com"
 ```
 
 ### ChatGPT Plugin Setup
 
-1. In ChatGPT, go to **Settings → Plugins → My Plugins** (or similar, depending on your version).
-2. Click **Add a new custom plugin** or **Create Plugin**.
+1. In ChatGPT, go to **Settings → Plugins** (or similar, depending on your version)
+2. Click **Add a new plugin** or **Create Plugin**
 3. Configure the following:
    - **Name**: Termux MCP
-   - **MCP Server URL**: Use the tunnel URL from `termux-mcp` (e.g., `https://xxxxx.trycloudflare.com/mcp`)
-   - **Authentication**: OAuth 2.1
-   - **OAuth Callback URL**: Your plugin's configured callback
-4. Leave **Client ID** and **Secret** blank (they are auto-generated by the server).
-5. On the approval page, enter the consent password (from `termux-mcp password`).
+   - **MCP Server URL**: Use the tunnel URL from `termux-mcp` output (e.g., `https://xxxxx.trycloudflare.com/mcp`)
+   - **Authentication Method**: OAuth 2.1
+   - **Authorization URL**: `https://xxxxx.trycloudflare.com/authorize`
+   - **Token URL**: `https://xxxxx.trycloudflare.com/token`
+4. Leave **Client ID** and **Client Secret** blank (they are auto-generated by the server)
+5. Click **Authorize** or similar
+6. You'll be redirected to the approval page. Enter the consent password (from `termux-mcp password`)
+7. Click **Approve**
 
 **Permissions**: Grant only the permissions your plugin needs. Avoid blanket access.
 
@@ -309,7 +446,7 @@ export MCP_ALLOW_UNRESTRICTED=0
    rm -rf "$HOME/termux-mcp"
    ```
 
-4. (Optional) Remove the global command:
+4. (Optional) Remove the global commands:
    ```bash
    rm "$PREFIX/bin/termux-mcp"
    rm "$PREFIX/bin/termux-mcp-stdio"
@@ -337,25 +474,27 @@ bash termux-mcp-uninstall.sh
 | **OAuth scopes** | Least privilege (only needed ones) | Limits damage if token is compromised |
 | **Run as** | Unprivileged user (not root) | Minimizes blast radius if server is compromised |
 | **Updates** | Regular `pkg update && pkg upgrade` | Patches security vulnerabilities |
+| **File extensions** | Restricted list (.txt, .md, .json, etc.) | Prevents executable code injection |
+| **File size limit** | 128 KB per write | Prevents denial-of-service attacks |
 
 ---
 
 ## Contributing
 
 Contributions are welcome. When submitting code or scripts:
-- Avoid committing secrets or credentials of any kind.
-- Add clear documentation for security implications of changes.
-- Sign or provide checksums for release artifacts when possible.
-- Test locally before submitting pull requests.
+- Avoid committing secrets or credentials of any kind
+- Add clear documentation for security implications of changes
+- Sign or provide checksums for release artifacts when possible
+- Test locally before submitting pull requests
 
 ---
 
 ## Security Contact
 
 If you discover a security vulnerability, please:
-1. **Do NOT** post sensitive details publicly.
-2. Open an issue labeled "security" or contact the repository owner directly.
-3. Allow time for a fix before disclosure.
+1. **Do NOT** post sensitive details publicly
+2. Open an issue labeled "security" or contact the repository owner directly
+3. Allow time for a fix before public disclosure
 
 ---
 

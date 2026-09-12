@@ -1,60 +1,69 @@
 #!/data/data/com.termux/files/usr/bin/bash
-set -e
 
 echo "Uninstalling Termux MCP..."
+echo ""
 
 # Stop running sessions
-echo "Stopping tmux sessions..."
-tmux kill-session -t mcp-server 2>/dev/null || true
-tmux kill-session -t mcp-tunnel 2>/dev/null || true
-tmux kill-session -t mcp-ai 2>/dev/null || true
+for s in mcp-server mcp-tunnel mcp-ai; do
+  if tmux has-session -t "$s" 2>/dev/null; then
+    tmux kill-session -t "$s"
+    echo "  killed session: $s"
+  fi
+done
 
-# Release wake lock
 termux-wake-unlock 2>/dev/null || true
 
-# Remove the server directory (includes .consent_password, audit.log, tunnel.log, node_modules)
-if [ -d ~/termux-mcp ]; then
-  echo "Removing ~/termux-mcp..."
-  rm -rf ~/termux-mcp
-fi
+# Remove each path and verify
+remove_path() {
+  local target="$1"
+  local label="$2"
+  if [ -e "$target" ]; then
+    rm -rf "$target"
+    if [ -e "$target" ]; then
+      echo "  FAILED to remove: $label ($target)"
+      return 1
+    else
+      echo "  removed: $label"
+    fi
+  else
+    echo "  already absent: $label"
+  fi
+  return 0
+}
 
-# Remove the sandbox and isolated home
-if [ -d ~/mcp-work ]; then
-  echo "Removing ~/mcp-work..."
-  rm -rf ~/mcp-work
-fi
+FAIL=0
 
-if [ -d ~/mcp-ai-home ]; then
-  echo "Removing ~/mcp-ai-home..."
-  rm -rf ~/mcp-ai-home
-fi
+remove_path ~/termux-mcp "~/termux-mcp" || FAIL=1
+remove_path ~/mcp-work "~/mcp-work" || FAIL=1
+remove_path ~/mcp-ai-home "~/mcp-ai-home" || FAIL=1
+remove_path "$PREFIX/bin/termux-mcp" "termux-mcp command" || FAIL=1
+remove_path "$PREFIX/bin/termux-mcp-stdio" "termux-mcp-stdio command" || FAIL=1
 
-# Remove the commands
-if [ -f $PREFIX/bin/termux-mcp ]; then
-  echo "Removing termux-mcp command..."
-  rm -f $PREFIX/bin/termux-mcp
-fi
-
-if [ -f $PREFIX/bin/termux-mcp-stdio ]; then
-  echo "Removing termux-mcp-stdio command..."
-  rm -f $PREFIX/bin/termux-mcp-stdio
-fi
+# Verify no sessions remain
+REMAINING_SESSIONS=$(tmux ls 2>/dev/null | grep -E '^(mcp-server|mcp-tunnel|mcp-ai):' || true)
 
 echo ""
 echo "=============================================="
-echo "Uninstall complete."
+if [ "$FAIL" -eq 0 ] && [ -z "$REMAINING_SESSIONS" ]; then
+  echo "✓ Uninstall verified. Everything is gone."
+else
+  echo "⚠️  Uninstall incomplete."
+  [ "$FAIL" -ne 0 ] && echo "    Some files could not be removed (see above)."
+  [ -n "$REMAINING_SESSIONS" ] && echo "    Sessions still running:" && echo "$REMAINING_SESSIONS"
+fi
 echo "=============================================="
 echo ""
-echo "Removed:"
-echo "  ~/termux-mcp/       (server, keys, password, audit log)"
-echo "  ~/mcp-work/         (sandbox files)"
-echo "  ~/mcp-ai-home/      (isolated session home)"
-echo "  \$PREFIX/bin/termux-mcp"
-echo "  \$PREFIX/bin/termux-mcp-stdio"
+
+# Show what's actually left, if anything
+echo "Verification:"
+for p in ~/termux-mcp ~/mcp-work ~/mcp-ai-home "$PREFIX/bin/termux-mcp" "$PREFIX/bin/termux-mcp-stdio"; do
+  if [ -e "$p" ]; then
+    echo "  STILL EXISTS: $p"
+  fi
+done
+echo "  (nothing listed above means all clean)"
 echo ""
-echo "Packages were NOT removed. To remove them too:"
-echo "  pkg uninstall nodejs-lts cloudflared tmux"
+echo "Packages (nodejs-lts, cloudflared, tmux) were NOT removed."
+echo "To remove them: pkg uninstall nodejs-lts cloudflared tmux"
 echo ""
-echo "Also delete the connector in ChatGPT:"
-echo "  Settings -> Connectors -> Termux -> Delete"
-echo "=============================================="
+echo "Don't forget: delete the Termux connector in ChatGPT settings."

@@ -4,7 +4,7 @@ Run an MCP (Model Context Protocol) server on Android and connect it to ChatGPT 
 
 ## Overview
 
-Termux MCP enables you to integrate your Android device with ChatGPT by running a Model Context Protocol server on Termux. This allows ChatGPT to interact with your Android environment securely through a secure tunnel.
+Termux MCP enables you to integrate your Android device with ChatGPT by running a Model Context Protocol server on Termux. This allows ChatGPT to interact with your Android environment securely through a public tunnel.
 
 **Key Features:**
 - Secure OAuth 2.1 authentication
@@ -107,6 +107,75 @@ export MCP_DEBUG=true
 3. Configure the OAuth 2.1 callback URL
 4. Enter the tunnel URL provided by `termux-mcp`
 5. Authorize the plugin to access your MCP server
+
+## Uninstallation
+
+### Quick Uninstall
+
+Run the uninstallation script:
+
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/Calvin980/Chatgpt-plugin-mcp/main/uninstall.sh)
+```
+
+This script will automatically:
+- Stop all running tmux sessions
+- Remove the MCP server directory
+- Delete sandbox and isolated home directories
+- Remove command-line tools
+- Preserve installed packages for manual removal if desired
+
+### Manual Uninstall
+
+If you prefer to uninstall manually or need to remove specific components, follow these steps:
+
+1. **Stop running sessions:**
+   ```bash
+   tmux kill-session -t mcp-server 2>/dev/null || true
+   tmux kill-session -t mcp-tunnel 2>/dev/null || true
+   tmux kill-session -t mcp-ai 2>/dev/null || true
+   ```
+
+2. **Release wake lock (if applicable):**
+   ```bash
+   termux-wake-unlock 2>/dev/null || true
+   ```
+
+3. **Remove the server directory** (includes .consent_password, audit.log, tunnel.log, node_modules):
+   ```bash
+   rm -rf ~/termux-mcp
+   ```
+
+4. **Remove the sandbox and isolated home directories:**
+   ```bash
+   rm -rf ~/mcp-work
+   rm -rf ~/mcp-ai-home
+   ```
+
+5. **Remove the command-line tools:**
+   ```bash
+   rm -f $PREFIX/bin/termux-mcp
+   rm -f $PREFIX/bin/termux-mcp-stdio
+   ```
+
+6. **Optional: Remove installed packages** (only if you don't need them for other purposes):
+   ```bash
+   pkg uninstall nodejs-lts cloudflared tmux
+   ```
+
+7. **Delete the connector in ChatGPT:**
+   - Go to Settings → Connectors → Termux
+   - Click Delete
+
+### What Gets Removed
+
+- `~/termux-mcp/` — Server code, keys, consent password, and audit logs
+- `~/mcp-work/` — Sandbox files created by the MCP server
+- `~/mcp-ai-home/` — Isolated session home directory
+- `$PREFIX/bin/termux-mcp` — Main command-line tool
+- `$PREFIX/bin/termux-mcp-stdio` — Stdio server command-line tool
+
+**Note:** Installed packages (nodejs, cloudflared, tmux) are NOT automatically removed. Remove them manually if you don't need them for other purposes.
 
 ## Security
 
@@ -289,5 +358,5 @@ Planned features for future releases:
 
 ---
 
-**Last Updated**: September 11, 2026 at 10:30 AM
+**Last Updated**: September 12, 2026
 **Maintainer**: Calvin980

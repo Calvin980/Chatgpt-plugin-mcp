@@ -3,30 +3,43 @@ set -e
 
 REPO="https://raw.githubusercontent.com/Calvin980/Chatgpt-plugin-mcp/main"
 
-echo "Installing Termux MCP..."
+echo ""
+echo "=============================================="
+echo "  Termux MCP Installer"
+echo "=============================================="
+echo ""
+
+echo "Updating packages..."
 pkg update -y && pkg upgrade -y
+
+echo "Installing dependencies..."
 pkg install -y nodejs-lts cloudflared tmux || pkg install -y nodejs cloudflared tmux
 
 mkdir -p ~/termux-mcp ~/mcp-work ~/mcp-ai-home
 cd ~/termux-mcp
 
+echo "Initializing npm project..."
 npm init -y >/dev/null
 npm install @modelcontextprotocol/sdk express zod jose --save-exact >/dev/null
 
-echo "Downloading files..."
+echo "Downloading server files..."
 curl -fsSL "$REPO/server.mjs"       -o server.mjs
 curl -fsSL "$REPO/stdio-server.mjs" -o stdio-server.mjs
 curl -fsSL "$REPO/start.sh"         -o start.sh
 curl -fsSL "$REPO/test-stdio.sh"    -o test-stdio.sh 2>/dev/null || true
 chmod +x start.sh
+[ -f test-stdio.sh ] && chmod +x test-stdio.sh
 
 if [ ! -f .consent_password ]; then
   head -c 12 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 16 > .consent_password
   chmod 600 .consent_password
   echo ""
   echo "=============================================="
-  echo "CONSENT PASSWORD: $(cat .consent_password)"
-  echo "Write this down."
+  echo "  CONSENT PASSWORD: $(cat .consent_password)"
+  echo ""
+  echo "  Write this down."
+  echo "  You'll need it to approve the connector"
+  echo "  in ChatGPT."
   echo "=============================================="
   echo ""
 fi
@@ -44,8 +57,18 @@ CMDEOF
 chmod +x $PREFIX/bin/termux-mcp-stdio
 
 echo ""
-echo "Done."
-echo "  termux-mcp              start"
-echo "  termux-mcp stop         stop"
-echo "  termux-mcp audit        show activity"
-echo "  termux-mcp password     show consent password"
+echo "=============================================="
+echo "  Installation complete."
+echo "=============================================="
+echo ""
+echo "Commands:"
+echo "  termux-mcp                    start (restricted)"
+echo "  termux-mcp unrestricted       start (full access)"
+echo "  termux-mcp stop               stop"
+echo "  termux-mcp audit              show recent activity"
+echo "  termux-mcp password           show consent password"
+echo "  termux-mcp-stdio              local STDIO mode"
+echo ""
+echo "Get started:"
+echo "  termux-mcp"
+echo ""

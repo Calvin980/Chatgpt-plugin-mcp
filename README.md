@@ -479,6 +479,230 @@ bash termux-mcp-uninstall.sh
 
 ---
 
+## Troubleshooting
+
+### Server Won't Start
+
+**Problem**: `termux-mcp` command not found or server fails to start.
+
+**Solutions**:
+1. Verify installation completed successfully:
+   ```bash
+   ls -la ~/termux-mcp/
+   which termux-mcp
+   ```
+2. Reinstall or update the CLI commands:
+   ```bash
+   bash termux-mcp-install.sh
+   ```
+3. Check Termux packages are up-to-date:
+   ```bash
+   pkg update && pkg upgrade
+   ```
+4. Verify Node.js is installed:
+   ```bash
+   node --version
+   ```
+
+### Cloudflared Tunnel Not Connecting
+
+**Problem**: Tunnel URL shows error or ChatGPT cannot reach the MCP server.
+
+**Solutions**:
+1. Check internet connectivity:
+   ```bash
+   ping google.com
+   ```
+2. Verify Cloudflared is running:
+   ```bash
+   ps aux | grep cloudflared
+   ```
+3. Check the tunnel URL is valid:
+   ```bash
+   cat ~/termux-mcp/.last_url
+   ```
+4. Restart the server:
+   ```bash
+   termux-mcp stop
+   termux-mcp
+   ```
+
+### OAuth Authorization Fails
+
+**Problem**: ChatGPT cannot authorize or consent password is rejected.
+
+**Solutions**:
+1. Retrieve and verify the consent password:
+   ```bash
+   termux-mcp password
+   ```
+2. Ensure you're entering the password exactly as shown (case-sensitive).
+3. Check the audit log for authorization errors:
+   ```bash
+   termux-mcp audit
+   ```
+4. Regenerate the password if needed:
+   ```bash
+   rm ~/.consent_password
+   termux-mcp stop
+   termux-mcp
+   ```
+5. Re-authorize ChatGPT with the new password.
+
+### File Operations Not Working
+
+**Problem**: ChatGPT cannot read or write files; permission errors or "file not found".
+
+**Solutions**:
+1. Verify the work directory exists and has correct permissions:
+   ```bash
+   ls -ld ~/mcp-work
+   chmod 700 ~/mcp-work
+   ```
+2. Check that files are inside `~/mcp-work/`:
+   ```bash
+   ls -la ~/mcp-work/
+   ```
+3. Verify file extensions are allowed (check Configuration section).
+4. Check file size (default limit is 128 KB):
+   ```bash
+   ls -lah ~/mcp-work/your-file
+   ```
+5. Review audit logs for specific errors:
+   ```bash
+   tail -f ~/termux-mcp/audit.log
+   ```
+
+### Commands Timeout or Hang
+
+**Problem**: MCP commands hang or timeout, no response from server.
+
+**Solutions**:
+1. Check server process is running:
+   ```bash
+   ps aux | grep node
+   ```
+2. Verify the server is listening:
+   ```bash
+   netstat -tulpn | grep 8000
+   ```
+3. Check for high CPU or memory usage:
+   ```bash
+   top -n 1
+   ```
+4. Kill any stalled processes:
+   ```bash
+   termux-mcp stop
+   pkill -f node
+   ```
+5. Restart the server:
+   ```bash
+   termux-mcp
+   ```
+
+### Storage or Disk Space Issues
+
+**Problem**: "No space left on device" error or slow performance.
+
+**Solutions**:
+1. Check available disk space:
+   ```bash
+   df -h
+   ```
+2. Clean up old audit logs:
+   ```bash
+   truncate -s 0 ~/termux-mcp/audit.log
+   ```
+3. Remove old files from work directory:
+   ```bash
+   rm -rf ~/mcp-work/old-files
+   ```
+4. Clear Termux package cache:
+   ```bash
+   pkg clean
+   ```
+
+### OAuth Token Expired or Invalid
+
+**Problem**: ChatGPT shows "unauthorized" or "invalid token" errors.
+
+**Solutions**:
+1. OAuth tokens expire after 30 minutes (by design); request a new token in ChatGPT.
+2. If errors persist, revoke plugin access and re-authorize:
+   - Open ChatGPT settings
+   - Remove the Termux MCP plugin
+   - Restart the MCP server
+   - Re-add the plugin and authorize with the consent password
+3. Check server logs for token validation errors:
+   ```bash
+   termux-mcp audit
+   ```
+
+### Audit Logs Growing Too Large
+
+**Problem**: Audit log file consuming excessive disk space.
+
+**Solutions**:
+1. View current log size:
+   ```bash
+   ls -lh ~/termux-mcp/audit.log
+   ```
+2. Rotate or truncate logs:
+   ```bash
+   # Backup and clear
+   cp ~/termux-mcp/audit.log ~/termux-mcp/audit.log.backup
+   truncate -s 0 ~/termux-mcp/audit.log
+   ```
+3. Implement log rotation (e.g., use `logrotate` or a cron job).
+
+### Device Performance Degradation
+
+**Problem**: Phone becomes slow or unresponsive while server is running.
+
+**Solutions**:
+1. Stop the server when not in use:
+   ```bash
+   termux-mcp stop
+   ```
+2. Monitor resource usage:
+   ```bash
+   top -n 1
+   ```
+3. Run server in restricted mode (uses fewer resources):
+   ```bash
+   termux-mcp
+   ```
+4. Increase available memory by closing other apps.
+
+### ChatGPT Plugin Works Intermittently
+
+**Problem**: Sometimes commands succeed, sometimes fail; sporadic connection issues.
+
+**Solutions**:
+1. Check network stability:
+   ```bash
+   ping -c 5 google.com
+   ```
+2. Monitor server uptime:
+   ```bash
+   ps aux | grep node
+   tail -f ~/termux-mcp/audit.log
+   ```
+3. Verify Cloudflared tunnel is stable:
+   ```bash
+   ps aux | grep cloudflared
+   ```
+4. Check for rate limiting (audit logs show 429 errors):
+   ```bash
+   termux-mcp audit
+   ```
+5. Restart the server if issues persist:
+   ```bash
+   termux-mcp stop && sleep 2 && termux-mcp
+   ```
+
+---
+
 ## Contributing
 
 Contributions are welcome. When submitting code or scripts:

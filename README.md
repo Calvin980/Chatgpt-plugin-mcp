@@ -4,7 +4,7 @@ Run an MCP (Model Context Protocol) server on Android and connect it to ChatGPT 
 
 ## Overview
 
-Termux MCP enables you to integrate your Android device with ChatGPT by running a Model Context Protocol server on Termux. This allows ChatGPT to interact with your Android environment securely through OAuth 2.1 authentication, providing file access and execution capabilities within a sandboxed environment.
+Termux MCP enables you to integrate your Android device with ChatGPT by running a Model Context Protocol server on Termux. This allows ChatGPT to interact with your Android environment securely through a secure tunnel.
 
 **Key Features:**
 - Secure OAuth 2.1 authentication
@@ -289,5 +289,5 @@ Planned features for future releases:
 
 ---
 
-**Last Updated**: 2024
+**Last Updated**: September 11, 2026 at 10:30 AM
 **Maintainer**: Calvin980

@@ -26,6 +26,33 @@ All communication is encrypted (HTTPS via Cloudflared) and protected by **OAuth 
 
 ---
 
+### ⚠️ Unrestricted Mode Warning
+
+**Unrestricted mode is dangerous and should only be used when absolutely necessary.**
+
+When unrestricted mode is enabled, ChatGPT may be able to:
+
+- Execute commands outside the restricted sandbox
+- Read, create, modify, or delete files outside `~/mcp-work`
+- Access other tmux sessions
+- Launch applications or affect your Android device
+- Cause accidental or intentional damage if a request is misunderstood
+- Expose private information if sensitive files are accessible
+
+### Important Safety Rules
+
+- Use **restricted mode** whenever possible.
+- Keep `MCP_ALLOW_UNRESTRICTED=0` by default.
+- Never use unrestricted mode on a device containing sensitive data.
+- Back up important files before enabling unrestricted mode.
+- Stop the MCP server when you are finished.
+- Review audit logs for unexpected activity.
+- Do not assume authentication makes unrestricted mode completely safe.
+
+> Authentication, TOTP, consent prompts, and device approval reduce risk, but they cannot guarantee that unrestricted mode is safe.
+
+---
+
 ## ⚠️ Critical Security Notice (Read This First!)
 
 **Security is paramount** when exposing a personal device to the internet. Please read this before installation.

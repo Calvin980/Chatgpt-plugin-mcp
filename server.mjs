@@ -218,14 +218,17 @@ function timingSafeEq(a, b) {
   return crypto.timingSafeEqual(ba, bb);
 }
 
+// ---------- TOTP verification (FIXED) ----------
 async function verifyTotp(code) {
   if (!TOTP_SECRET) return { ok: true, skipped: true };
   if (!/^[0-9]{6}$/.test(code || "")) return { ok: false, reason: "format" };
 
   try {
-    for (const offset of [-1, 0, 1]) {
+    const now = Math.floor(Date.now() / 1000);
+    for (const offset of [-30, 0, 30]) {
+      const t = now + offset;
       const { stdout } = await execAsync(
-        `oathtool --totp -b -N @${offset * 30} ${JSON.stringify(TOTP_SECRET)}`,
+        `oathtool --totp -b -N @${t} ${JSON.stringify(TOTP_SECRET)}`,
         { shell: SHELL, timeout: T_FAST }
       );
       if (timingSafeEq(stdout.trim(), code)) return { ok: true };
@@ -236,6 +239,7 @@ async function verifyTotp(code) {
   }
 }
 
+// ---------- IP lockout ----------
 function isLockedOut(ip) {
   const attempts = totpAttempts.get(ip) || [];
   const recent = attempts.filter(a => Date.now() - a.ts < TOTP_LOCKOUT_MS && !a.ok);
@@ -249,6 +253,7 @@ function recordTotpAttempt(ip, ok) {
   if (ok) totpAttempts.set(ip, []);
 }
 
+// ---------- Device dialog approval ----------
 async function requestDeviceApproval() {
   if (!USE_DIALOG) return { ok: true, skipped: true };
   try {
@@ -265,7 +270,7 @@ async function requestDeviceApproval() {
 }
 
 // ============================================================
-// MCP Server with rich tool descriptions
+// MCP Server
 // ============================================================
 
 function createMcpServer() {
@@ -290,7 +295,7 @@ RULES:
 - File tools are sandboxed to ~/mcp-work in BOTH modes.`
   });
 
-  // ---------- Tier 0: read-only, always available ----------
+  // ---------- Tier 0: read-only ----------
 
   server.tool(
     "whoami",
@@ -363,7 +368,7 @@ RULES:
     }
   );
 
-  // ---------- Tier 2: mutating, require unlock ----------
+  // ---------- Tier 2: mutating ----------
 
   server.tool(
     "open_app",

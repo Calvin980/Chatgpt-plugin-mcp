@@ -11,6 +11,8 @@ Run an MCP (Model Context Protocol) server on Android via Termux and connect it 
 - 📱 **List and launch apps** by package name
 - 📊 **Access system information** (CPU, uptime, disk, memory)
 - 🖥️ **Run interactive sessions** via tmux (terminal multiplexer)
+- 🔐 **Generate and verify TOTP codes** for two-factor authentication
+- 🎨 **Display dialogs** via termux-dialog for user interaction
 
 All communication is encrypted (HTTPS via Cloudflared) and protected by **OAuth 2.1 authentication** with a consent password.
 
@@ -73,6 +75,8 @@ All communication is encrypted (HTTPS via Cloudflared) and protected by **OAuth 
 - **Easy install and management** — Single script, simple CLI commands
 - **Built on Model Context Protocol (MCP)** — Standard-based AI integration
 - **PKCE-protected OAuth** — Industry-standard security for public clients
+- **TOTP support** — Generate and verify time-based one-time passwords for 2FA
+- **termux-dialog integration** — Display interactive dialogs and prompts
 
 ---
 
@@ -232,6 +236,11 @@ Android Device (Termux)
 | `append_file` | Append to file in `~/mcp-work/` | ✓ | ✓ |
 | `tmux` (isolated) | Run commands in isolated session | ✓ | ✓ |
 | `tmux` (any session) | Access other tmux sessions | ✗ | ✓ |
+| `totp_generate` | Generate TOTP codes | ✓ | ✓ |
+| `totp_verify` | Verify TOTP codes | ✓ | ✓ |
+| `dialog_text` | Display text input dialog | ✓ | ✓ |
+| `dialog_confirm` | Display confirmation dialog | ✓ | ✓ |
+| `dialog_list` | Display list selection dialog | ✓ | ✓ |
 
 ### Sandbox Isolation (Restricted Mode)
 

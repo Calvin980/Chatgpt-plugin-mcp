@@ -11,6 +11,17 @@ case "$1" in
     exit 0
     ;;
 
+  panic)
+    echo "Killing everything..."
+    tmux kill-session -t mcp-server 2>/dev/null
+    tmux kill-session -t mcp-tunnel 2>/dev/null
+    tmux kill-session -t mcp-ai 2>/dev/null
+    termux-wake-unlock 2>/dev/null
+    rm -f ~/termux-mcp/.unlocked_until
+    echo "All sessions killed. OAuth tokens are gone."
+    exit 0
+    ;;
+
   audit)
     tail -n 50 ~/termux-mcp/audit.log 2>/dev/null || echo "(no audit log yet)"
     exit 0
@@ -21,14 +32,13 @@ case "$1" in
     exit 0
     ;;
 
-  panic)
-    echo "Killing everything..."
-    tmux kill-session -t mcp-server 2>/dev/null
-    tmux kill-session -t mcp-tunnel 2>/dev/null
-    tmux kill-session -t mcp-ai 2>/dev/null
-    termux-wake-unlock 2>/dev/null
-    rm -f ~/termux-mcp/.unlocked_until
-    echo "All sessions killed. OAuth tokens are gone."
+  factors)
+    echo ""
+    echo "Auth factors:"
+    [ -f ~/termux-mcp/.consent_password ] && echo "  [x] Password" || echo "  [ ] Password"
+    [ -f ~/termux-mcp/.totp_secret ] && echo "  [x] TOTP" || echo "  [ ] TOTP"
+    [ -f ~/termux-mcp/.use_dialog ] && echo "  [x] Device dialog" || echo "  [ ] Device dialog"
+    echo ""
     exit 0
     ;;
 
@@ -53,6 +63,28 @@ esac
 
 MODE="restricted"
 [ "$1" = "unrestricted" ] && MODE="unrestricted"
+
+# First-run email prompt (optional — used only if you later wire up a notify script)
+if [ ! -f ~/termux-mcp/.owner_email ]; then
+  echo ""
+  echo "Optional: owner email for notifications."
+  echo "Leave blank to skip."
+  echo ""
+  printf "Email: "
+  read -r OWNER_EMAIL
+  if [ -n "$OWNER_EMAIL" ]; then
+    if echo "$OWNER_EMAIL" | grep -qE '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'; then
+      echo "$OWNER_EMAIL" > ~/termux-mcp/.owner_email
+      chmod 600 ~/termux-mcp/.owner_email
+      echo "Saved: $OWNER_EMAIL"
+    else
+      echo "Invalid email, skipping."
+    fi
+  else
+    echo "Skipped."
+  fi
+  echo ""
+fi
 
 mkdir -p ~/mcp-work ~/mcp-ai-home
 tmux kill-session -t mcp-server 2>/dev/null
@@ -83,23 +115,25 @@ echo "$URL" > ~/termux-mcp/.last_url
 echo ""
 echo "=============================================="
 if [ "$MODE" = "unrestricted" ]; then
-  echo "⚠️  Termux MCP — UNRESTRICTED MODE"
+  echo "  Termux MCP - UNRESTRICTED MODE"
 else
-  echo "✓ Termux MCP running (restricted)"
+  echo "  Termux MCP running (restricted)"
 fi
 echo "=============================================="
 echo "MCP URL:   $URL/mcp"
 echo "Auth:      OAuth + consent password"
+[ -f ~/termux-mcp/.totp_secret ] && echo "           + TOTP"
+[ -f ~/termux-mcp/.use_dialog ] && echo "           + Device dialog"
 echo "Password:  $(cat ~/termux-mcp/.consent_password 2>/dev/null || echo '(none)')"
 echo ""
 echo "In ChatGPT: leave Client ID and Secret blank."
-echo "On the approve page: enter the password above."
 echo ""
 echo "Commands:"
-echo "  termux-mcp stop        kill everything"
-echo "  termux-mcp panic       kill everything + clear unlock"
-echo "  termux-mcp unlock [n]  allow mutating tools for n minutes"
-echo "  termux-mcp lock        lock immediately"
-echo "  termux-mcp audit       show recent activity"
-echo "  termux-mcp password    show consent password"
+echo "  termux-mcp stop         kill everything"
+echo "  termux-mcp panic        kill + clear unlock"
+echo "  termux-mcp unlock [n]   allow mutating tools for n minutes"
+echo "  termux-mcp lock         lock immediately"
+echo "  termux-mcp factors      show which auth factors are on"
+echo "  termux-mcp audit        show recent activity"
+echo "  termux-mcp password     show consent password"
 echo "=============================================="

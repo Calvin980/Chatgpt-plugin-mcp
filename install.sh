@@ -21,16 +21,14 @@ case "$MIRROR_ANSWER" in
   y|Y|yes|YES|Yes)
     echo ""
     echo "Setting up faster mirrors..."
-    bash <(curl -sL https://raw.githubusercontent.com/rugved-danej/termux-best-mirror/main/install.sh)
+    bash <(curl -sL https://raw.githubusercontent.com/rugved-danej/termux-best-mirror/main/install.sh) || true
     echo ""
     echo "Applying mirrors..."
-    termux-best-mirror
-    echo ""
-    echo "Mirrors configured."
+    termux-best-mirror 2>/dev/null || echo "Mirror command not found, continuing."
     echo ""
     ;;
   *)
-    echo "Skipping mirror setup. Using default mirrors."
+    echo "Skipping mirror setup."
     echo ""
     ;;
 esac
@@ -56,6 +54,7 @@ curl -fsSL "$REPO/test-stdio.sh"    -o test-stdio.sh 2>/dev/null || true
 chmod +x start.sh
 [ -f test-stdio.sh ] && chmod +x test-stdio.sh
 
+# ---------- Factor 1: Consent password ----------
 if [ ! -f .consent_password ]; then
   head -c 12 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 16 > .consent_password
   chmod 600 .consent_password
@@ -64,12 +63,54 @@ if [ ! -f .consent_password ]; then
   echo "  CONSENT PASSWORD: $(cat .consent_password)"
   echo ""
   echo "  Write this down."
-  echo "  You'll need it to approve the connector"
-  echo "  in ChatGPT."
   echo "=============================================="
   echo ""
 fi
 
+# ---------- Factor 2: TOTP ----------
+echo ""
+printf "Enable TOTP as a second factor? [y/N]: "
+read -r WANT_TOTP
+if [ "$WANT_TOTP" = "y" ] || [ "$WANT_TOTP" = "Y" ]; then
+  pkg install -y oathtool || true
+  if [ ! -f .totp_secret ]; then
+    SECRET=$(head -c 20 /dev/urandom | base32 | head -c 32 | tr -d '=')
+    echo "$SECRET" > .totp_secret
+    chmod 600 .totp_secret
+    echo ""
+    echo "=============================================="
+    echo "  TOTP SECRET: $SECRET"
+    echo ""
+    echo "  Add to authenticator app:"
+    echo "    Account:  Termux MCP"
+    echo "    Secret:   $SECRET"
+    echo "    Type:     Time-based (TOTP)"
+    echo "    Digits:   6"
+    echo "    Period:   30"
+    echo "    Algo:     SHA1"
+    echo ""
+    echo "  Write it down."
+    echo "=============================================="
+    echo ""
+  else
+    echo "TOTP already configured."
+  fi
+fi
+
+# ---------- Factor 3: Device dialog ----------
+echo ""
+printf "Enable device approval dialog? [y/N]: "
+read -r WANT_DIALOG
+if [ "$WANT_DIALOG" = "y" ] || [ "$WANT_DIALOG" = "Y" ]; then
+  pkg install -y termux-api || true
+  touch .use_dialog
+  echo ""
+  echo "Device approval enabled."
+  echo "You must install the Termux:API app from F-Droid."
+  echo ""
+fi
+
+# ---------- Command wrappers ----------
 cat > $PREFIX/bin/termux-mcp <<'CMDEOF'
 #!/data/data/com.termux/files/usr/bin/bash
 bash ~/termux-mcp/start.sh "$@"
@@ -91,9 +132,10 @@ echo "Commands:"
 echo "  termux-mcp                    start (restricted)"
 echo "  termux-mcp unrestricted       start (full access)"
 echo "  termux-mcp stop               stop"
+echo "  termux-mcp panic              emergency kill"
 echo "  termux-mcp unlock [n]         allow mutating tools"
 echo "  termux-mcp lock               lock immediately"
-echo "  termux-mcp panic              emergency kill"
+echo "  termux-mcp factors            show active auth factors"
 echo "  termux-mcp audit              show recent activity"
 echo "  termux-mcp password           show consent password"
 echo "  termux-mcp-stdio              local STDIO mode"

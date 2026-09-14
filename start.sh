@@ -82,7 +82,7 @@ esac
 MODE="restricted"
 [ "$1" = "unrestricted" ] && MODE="unrestricted"
 
-# Check Tailscale is installed
+# ---------- Check Tailscale is installed ----------
 if ! command -v tailscale >/dev/null 2>&1; then
   echo "Tailscale is not installed."
   echo "Install it with:"
@@ -90,21 +90,31 @@ if ! command -v tailscale >/dev/null 2>&1; then
   exit 1
 fi
 
-# Check Tailscale daemon is running
+# ---------- Try to start the daemon if it isn't running ----------
 if ! tailscale status >/dev/null 2>&1; then
-  echo "Tailscale is not running."
-  echo ""
-  echo "Start it with:"
-  echo "  tailscale up"
-  echo ""
-  echo "If the daemon is not running:"
-  echo "  tailscaled --tun=userspace-networking --socks5-server=127.0.0.1:1055 &"
-  echo "  sleep 3"
-  echo "  tailscale up"
-  exit 1
+  echo "Tailscale daemon not running. Attempting to start..."
+  if command -v tailscaled-start >/dev/null 2>&1; then
+    tailscaled-start >/dev/null 2>&1
+    sleep 3
+  fi
+
+  # Still not running? Give up with clear instructions
+  if ! tailscale status >/dev/null 2>&1; then
+    echo ""
+    echo "Could not start Tailscale daemon."
+    echo ""
+    echo "Try manually:"
+    echo "  tailscaled-start"
+    echo "  tailscale up"
+    echo ""
+    echo "If it's not logged in yet:"
+    echo "  tailscale up"
+    echo ""
+    exit 1
+  fi
 fi
 
-# Check jq is installed
+# ---------- Check jq is installed ----------
 if ! command -v jq >/dev/null 2>&1; then
   echo "jq is not installed. Installing..."
   pkg install -y jq || { echo "Failed to install jq. Run: pkg install jq"; exit 1; }
@@ -114,7 +124,7 @@ mkdir -p ~/mcp-work ~/mcp-ai-home
 tmux kill-session -t mcp-server 2>/dev/null
 tmux kill-session -t mcp-ai 2>/dev/null
 
-# Get the permanent Tailscale Funnel URL
+# ---------- Get the permanent Tailscale Funnel URL ----------
 DNS_NAME=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' | sed 's/\.$//')
 if [ -z "$DNS_NAME" ] || [ "$DNS_NAME" = "null" ]; then
   echo "Could not read Tailscale DNS name."

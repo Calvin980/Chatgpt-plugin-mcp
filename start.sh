@@ -535,6 +535,67 @@ cmd_restore() {
 }
 
 # ============================================================
+# Command list
+# ============================================================
+
+cmd_list() {
+  cat <<'EOF'
+
+Termux MCP — all commands
+============================================================
+
+SERVER
+  termux-mcp start              Start in restricted mode
+  termux-mcp unrestricted       Start in unrestricted mode
+  termux-mcp stop               Stop the server
+  termux-mcp restart            Stop, then start (restricted)
+  termux-mcp unlock [n]         Allow mutating tools for n minutes (default 5)
+  termux-mcp lock               Lock mutating tools immediately
+  termux-mcp panic              Kill everything and clear unlock
+
+URL & TAILSCALE
+  termux-mcp url                Print MCP URL
+  termux-mcp open               Open MCP URL in browser
+  termux-mcp copy               Copy MCP URL to clipboard
+  termux-mcp qr-url             Show MCP URL as QR code
+  termux-mcp rename [name]      Rename machine (changes URL subdomain)
+  termux-mcp rename-tailnet     Open console to rename tailnet
+  termux-mcp funnel             Show Funnel status
+  termux-mcp funnel on          Enable Funnel on port 8000
+  termux-mcp funnel off         Disable Funnel
+  termux-mcp ts                 Tailscale status
+
+AUTH
+  termux-mcp factors            Show which auth factors are on
+  termux-mcp password           Print the consent password
+  termux-mcp totp               Print the TOTP secret
+  termux-mcp totp-code          Print current valid TOTP code
+  termux-mcp qr-totp            Show TOTP secret as QR code
+  termux-mcp reset-password     Generate a new password
+  termux-mcp reset-totp         Generate a new TOTP secret
+  termux-mcp toggle-dialog      Enable/disable the device dialog
+
+LOGS & INFO
+  termux-mcp audit              Show last 50 audit entries
+  termux-mcp tail               Follow audit log live
+  termux-mcp test               Run the test suite
+  termux-mcp info               Show system info
+
+MAINTENANCE
+  termux-mcp update             Pull latest files from GitHub
+  termux-mcp backup [path]      Backup password + TOTP
+  termux-mcp restore [path]     Restore from backup
+
+OTHER
+  termux-mcp                    Interactive menu
+  termux-mcp list               Show this list
+  termux-mcp help               Show this list
+
+============================================================
+EOF
+}
+
+# ============================================================
 # Interactive menu
 # ============================================================
 
@@ -599,6 +660,7 @@ print_menu() {
   echo "  31) Backup config"
   echo "  32) Restore config"
   echo ""
+  echo "  33) Show all commands"
   echo "   0) Exit"
   echo ""
 }
@@ -637,6 +699,7 @@ menu_choice() {
     30) cmd_update ;;
     31) cmd_backup ;;
     32) cmd_restore ;;
+    33) cmd_list ;;
     0) echo "Bye."; exit 0 ;;
     *) echo "Invalid choice." ;;
   esac
@@ -658,59 +721,11 @@ show_menu() {
 }
 
 # ============================================================
-# Help
+# Help (same as list)
 # ============================================================
 
 show_help() {
-  cat <<'EOF'
-
-Termux MCP — commands
-
-  Server
-    termux-mcp start              Start (restricted)
-    termux-mcp unrestricted       Start (unrestricted)
-    termux-mcp stop               Stop server
-    termux-mcp restart            Stop then start
-    termux-mcp unlock [n]         Allow mutating tools for n minutes (default 5)
-    termux-mcp lock               Lock immediately
-    termux-mcp panic              Kill everything and clear unlock
-
-  URL & Tailscale
-    termux-mcp url                Print MCP URL
-    termux-mcp open               Open MCP URL in browser
-    termux-mcp copy               Copy MCP URL to clipboard
-    termux-mcp qr-url             Show MCP URL as QR code
-    termux-mcp rename [name]      Rename machine (changes URL subdomain)
-    termux-mcp rename-tailnet     Open console to rename tailnet
-    termux-mcp funnel [on|off]    Manage Funnel
-    termux-mcp ts                 Tailscale status
-
-  Auth
-    termux-mcp factors            Show which auth factors are on
-    termux-mcp password           Print the consent password
-    termux-mcp totp               Print the TOTP secret
-    termux-mcp totp-code          Print current TOTP code
-    termux-mcp qr-totp            Show TOTP secret as QR code
-    termux-mcp reset-password     Generate new password
-    termux-mcp reset-totp         Generate new TOTP secret
-    termux-mcp toggle-dialog      Enable/disable device dialog
-
-  Logs & Info
-    termux-mcp audit              Show last 50 audit entries
-    termux-mcp tail               Follow audit log
-    termux-mcp test               Run test suite
-    termux-mcp info               Show system info
-
-  Maintenance
-    termux-mcp update             Pull latest files from GitHub
-    termux-mcp backup [path]      Backup password + TOTP
-    termux-mcp restore [path]     Restore from backup
-
-  Menu
-    termux-mcp                    Interactive menu
-    termux-mcp help               Show this help
-
-EOF
+  cmd_list
 }
 
 # ============================================================
@@ -720,6 +735,7 @@ EOF
 case "$1" in
   ""|menu)          show_menu ;;
   help|-h|--help)   show_help ;;
+  list|commands)    cmd_list ;;
 
   # Server
   start|restricted) cmd_start_server restricted ;;
@@ -763,7 +779,7 @@ case "$1" in
 
   *)
     echo "Unknown command: $1"
-    echo "Run 'termux-mcp help' for the full list."
+    echo "Run 'termux-mcp list' for the full list."
     exit 1
     ;;
 esac

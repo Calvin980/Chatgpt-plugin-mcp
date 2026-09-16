@@ -39,7 +39,6 @@ pkg update -y && pkg upgrade -y
 echo "Installing dependencies..."
 pkg install -y nodejs-lts tmux jq || pkg install -y nodejs tmux jq
 
-# ---------- Tailscale install ----------
 if ! command -v tailscale >/dev/null 2>&1; then
   echo ""
   echo "Installing Tailscale (patched for Termux)..."
@@ -50,7 +49,6 @@ else
   echo "Tailscale already installed."
 fi
 
-# ---------- Start Tailscale daemon ----------
 if command -v tailscaled-start >/dev/null 2>&1; then
   echo ""
   echo "Starting Tailscale daemon..."
@@ -58,7 +56,6 @@ if command -v tailscaled-start >/dev/null 2>&1; then
   sleep 3
 fi
 
-# ---------- Set up the server directory ----------
 mkdir -p ~/termux-mcp ~/mcp-work ~/mcp-ai-home
 cd ~/termux-mcp
 
@@ -68,8 +65,15 @@ npm install @modelcontextprotocol/sdk express zod jose --save-exact >/dev/null
 
 echo "Downloading server files..."
 curl -fsSL "$REPO/server.mjs"       -o server.mjs
+curl -fsSL "$REPO/config.mjs"       -o config.mjs
+curl -fsSL "$REPO/audit.mjs"        -o audit.mjs
+curl -fsSL "$REPO/state.mjs"        -o state.mjs
+curl -fsSL "$REPO/oauth.mjs"        -o oauth.mjs
+curl -fsSL "$REPO/tools.mjs"        -o tools.mjs
+curl -fsSL "$REPO/http.mjs"         -o http.mjs
 curl -fsSL "$REPO/lib.mjs"          -o lib.mjs
 curl -fsSL "$REPO/test.mjs"         -o test.mjs
+curl -fsSL "$REPO/test-http.mjs"    -o test-http.mjs
 curl -fsSL "$REPO/stdio-server.mjs" -o stdio-server.mjs
 curl -fsSL "$REPO/start.sh"         -o start.sh
 curl -fsSL "$REPO/test-stdio.sh"    -o test-stdio.sh 2>/dev/null || true
@@ -132,6 +136,26 @@ if [ "$WANT_DIALOG" = "y" ] || [ "$WANT_DIALOG" = "Y" ]; then
   echo ""
 fi
 
+# ---------- Notifications ----------
+echo ""
+printf "Enable push notifications via ntfy? [y/N]: "
+read -r WANT_NTFY
+if [ "$WANT_NTFY" = "y" ] || [ "$WANT_NTFY" = "Y" ]; then
+  echo ""
+  echo "Pick a topic name. Anyone who knows it can read your notifications,"
+  echo "so use something random (e.g. termux-mcp-a8k3j9x2)."
+  echo ""
+  printf "ntfy topic: "
+  read -r NTFY_TOPIC
+  if [ -n "$NTFY_TOPIC" ]; then
+    echo "$NTFY_TOPIC" > .ntfy_topic
+    chmod 600 .ntfy_topic
+    echo "Saved. Subscribe to '$NTFY_TOPIC' in the ntfy app."
+    echo "Sending test..."
+    curl -s -d "Termux MCP installed" "https://ntfy.sh/$NTFY_TOPIC" >/dev/null 2>&1
+  fi
+fi
+
 # ---------- Command wrappers ----------
 cat > $PREFIX/bin/termux-mcp <<'CMDEOF'
 #!/data/data/com.termux/files/usr/bin/bash
@@ -145,11 +169,16 @@ exec node ~/termux-mcp/stdio-server.mjs
 CMDEOF
 chmod +x $PREFIX/bin/termux-mcp-stdio
 
-# ---------- Run test suite ----------
+# ---------- Run test suites ----------
 echo ""
-echo "Running test suite..."
+echo "Running pure logic tests..."
 cd ~/termux-mcp
 node --test test.mjs 2>&1 | tail -5 || true
+
+echo ""
+echo "Running HTTP tests..."
+MCP_TEST=1 MCP_DATA_DIR="/tmp/termux-mcp-install-test-$$" node --test test-http.mjs 2>&1 | tail -5 || true
+rm -rf /tmp/termux-mcp-install-test-* 2>/dev/null
 
 # ---------- Final instructions ----------
 echo ""
@@ -168,10 +197,6 @@ if tailscale status >/dev/null 2>&1; then
   echo ""
   echo "  2. Start the server:"
   echo "       termux-mcp"
-  echo ""
-  echo "     This opens an interactive menu. Pick option 1"
-  echo "     to start in restricted mode, or option 2 for"
-  echo "     unrestricted."
   echo ""
 else
   echo "Tailscale login required."

@@ -61,10 +61,11 @@ serve_configured() {
 
 is_unlocked() {
   [ -f "$DATA_DIR/.unlocked_until" ] || return 1
-  local until
+  local until now_ms
   until=$(cat "$DATA_DIR/.unlocked_until" 2>/dev/null)
   [ -z "$until" ] && return 1
-  [ "$(date +%s%3N)" -lt "$until" ] 2>/dev/null
+  now_ms=$(( $(date +%s) * 1000 ))
+  [ "$now_ms" -lt "$until" ]
 }
 
 ensure_jq() {
@@ -157,6 +158,23 @@ cmd_start_server() {
   tmux new-session -d -s mcp-server \
     "PUBLIC_URL='$url' MCP_ALLOW_UNRESTRICTED=$unrestricted node $DATA_DIR/server.mjs"
   sleep 2
+
+  if ! tmux has-session -t mcp-server 2>/dev/null; then
+    echo ""
+    echo "ERROR: Server process died immediately."
+    echo "Last output:"
+    tmux capture-pane -t mcp-server -p 2>/dev/null | tail -20
+    exit 1
+  fi
+
+  if ! curl -s -o /dev/null --max-time 3 "http://127.0.0.1:8000/.well-known/oauth-authorization-server" 2>/dev/null; then
+    echo ""
+    echo "ERROR: Server started but isn't responding on port 8000."
+    echo "Last output:"
+    tmux capture-pane -t mcp-server -p 2>/dev/null | tail -20
+    exit 1
+  fi
+
   echo "$url" > "$DATA_DIR/.last_url"
 
   echo ""
@@ -271,7 +289,6 @@ cmd_sessions() {
 cmd_attach_ai() {
   if ! ai_running; then
     echo "The mcp-ai session isn't running."
-    echo "Start the server and use the AI, or create it manually."
     return 1
   fi
   echo "Attaching to mcp-ai..."
@@ -283,7 +300,6 @@ cmd_attach_ai() {
 cmd_attach_server() {
   if ! server_running; then
     echo "The mcp-server session isn't running."
-    echo "Start it first: termux-mcp start"
     return 1
   fi
   echo "Attaching to mcp-server..."
@@ -623,11 +639,43 @@ cmd_revoke_clients() {
     return 1
   fi
   cmd_stop
+  rm -f "$DATA_DIR/state/clients.json" "$DATA_DIR/state/tokens.json" "$DATA_DIR/state/refresh_tokens.json"
   sleep 1
   cmd_start_server restricted
   echo ""
-  echo "All OAuth clients have been wiped (they were in memory)."
+  echo "All OAuth clients have been wiped."
   echo "Reconnect from ChatGPT/Claude now."
+}
+
+cmd_notify() {
+  local topic="$1"
+  local file="$DATA_DIR/.ntfy_topic"
+
+  if [ -z "$topic" ]; then
+    if [ -f "$file" ]; then
+      echo "ntfy topic: $(cat "$file")"
+    else
+      echo "(no ntfy topic configured)"
+    fi
+    echo ""
+    echo "Usage: termux-mcp notify <topic>"
+    echo "  or:  termux-mcp notify off"
+    return 0
+  fi
+
+  if [ "$topic" = "off" ] || [ "$topic" = "none" ]; then
+    rm -f "$file"
+    echo "Notifications disabled."
+    return 0
+  fi
+
+  echo "$topic" > "$file"
+  chmod 600 "$file"
+  echo "Notifications enabled on topic: $topic"
+  echo ""
+  echo "Subscribe in the ntfy app to: $topic"
+  echo "Test notification sent..."
+  curl -s -d "Termux MCP notifications enabled" "https://ntfy.sh/$topic" >/dev/null 2>&1
 }
 
 # ============================================================
@@ -691,6 +739,12 @@ cmd_test() {
   node --test test.mjs
 }
 
+cmd_test_http() {
+  cd "$DATA_DIR"
+  node --test test-http.mjs
+  rm -rf /tmp/termux-mcp-test-* 2>/dev/null
+}
+
 cmd_info() {
   echo ""
   echo "=== Termux MCP system info ==="
@@ -733,7 +787,6 @@ cmd_health() {
 
   local issues=0
 
-  # Node
   if command -v node >/dev/null 2>&1; then
     echo "[OK]   Node: $(node -v)"
   else
@@ -741,7 +794,6 @@ cmd_health() {
     issues=$((issues+1))
   fi
 
-  # jq
   if command -v jq >/dev/null 2>&1; then
     echo "[OK]   jq installed"
   else
@@ -749,7 +801,6 @@ cmd_health() {
     issues=$((issues+1))
   fi
 
-  # Tailscale CLI
   if command -v tailscale >/dev/null 2>&1; then
     echo "[OK]   Tailscale CLI installed"
   else
@@ -757,7 +808,6 @@ cmd_health() {
     issues=$((issues+1))
   fi
 
-  # Daemon
   if tailscale status >/dev/null 2>&1; then
     echo "[OK]   Tailscale daemon running"
   else
@@ -765,7 +815,6 @@ cmd_health() {
     issues=$((issues+1))
   fi
 
-  # Funnel
   if funnel_active; then
     echo "[OK]   Funnel on"
   else
@@ -773,14 +822,12 @@ cmd_health() {
     issues=$((issues+1))
   fi
 
-  # Server
   if server_running; then
     echo "[OK]   Server running ($(server_mode))"
   else
     echo "[INFO] Server stopped"
   fi
 
-  # URL reachable
   local u
   u=$(get_url 2>/dev/null)
   if [ -n "$u" ] && server_running; then
@@ -794,7 +841,6 @@ cmd_health() {
     fi
   fi
 
-  # Auth factors
   local factors=0
   [ -f "$DATA_DIR/.consent_password" ] && factors=$((factors+1))
   [ -f "$DATA_DIR/.totp_secret" ] && factors=$((factors+1))
@@ -821,7 +867,7 @@ cmd_health() {
 cmd_update() {
   echo "Downloading latest files from GitHub..."
   local failed=0
-  for f in server.mjs lib.mjs test.mjs stdio-server.mjs start.sh; do
+  for f in server.mjs config.mjs audit.mjs state.mjs oauth.mjs tools.mjs http.mjs lib.mjs test.mjs test-http.mjs stdio-server.mjs start.sh; do
     if curl -fsSL "$REPO/$f" -o "$DATA_DIR/$f"; then
       echo "  updated: $f"
     else
@@ -842,7 +888,7 @@ cmd_update() {
 cmd_check_update() {
   echo "Checking for updates..."
   local changed=0
-  for f in server.mjs lib.mjs test.mjs stdio-server.mjs start.sh; do
+  for f in server.mjs config.mjs audit.mjs state.mjs oauth.mjs tools.mjs http.mjs lib.mjs test.mjs test-http.mjs stdio-server.mjs start.sh; do
     local local_hash remote_hash
     local_hash=$(sha256sum "$DATA_DIR/$f" 2>/dev/null | cut -d' ' -f1)
     remote_hash=$(curl -fsSL "$REPO/$f" 2>/dev/null | sha256sum | cut -d' ' -f1)
@@ -938,9 +984,9 @@ SERVER
   termux-mcp stop               Stop the server
   termux-mcp restart            Stop, then start (restricted)
   termux-mcp restart-unrestricted  Stop, then start (unrestricted)
-  termux-mcp shutdown           Stop server + remove Funnel (URL dies)
+  termux-mcp shutdown           Stop server + remove Funnel
   termux-mcp shutdown-all       Stop everything including Tailscale daemon
-  termux-mcp unlock [n]         Allow mutating tools for n minutes (default 5)
+  termux-mcp unlock [n]         Allow mutating tools for n minutes
   termux-mcp lock               Lock mutating tools immediately
   termux-mcp panic              Kill all + remove Funnel + clear unlock
 
@@ -978,6 +1024,11 @@ AUTH
   termux-mcp toggle-dialog      Enable/disable the device dialog
   termux-mcp revoke-clients     Force all AI clients to re-authenticate
 
+NOTIFICATIONS
+  termux-mcp notify             Show ntfy topic
+  termux-mcp notify <topic>     Set ntfy topic
+  termux-mcp notify off         Disable notifications
+
 LOGS & DIAGNOSTICS
   termux-mcp audit              Show last 50 audit entries
   termux-mcp audit-stats        Summary of audit log
@@ -987,7 +1038,8 @@ LOGS & DIAGNOSTICS
   termux-mcp health             Full health check
   termux-mcp info               Show system info
   termux-mcp disk               Show disk usage
-  termux-mcp test               Run the test suite
+  termux-mcp test               Run pure logic test suite
+  termux-mcp test-http          Run HTTP-level test suite
 
 MAINTENANCE
   termux-mcp update             Pull latest files from GitHub
@@ -1076,25 +1128,30 @@ print_menu() {
   echo "  37) Toggle device dialog"
   echo "  38) Revoke all AI clients"
   echo ""
+  echo "  --- Notifications ---"
+  echo "  39) Show/set ntfy topic"
+  echo "  40) Disable notifications"
+  echo ""
   echo "  --- Logs & Diagnostics ---"
-  echo "  39) Audit log (last 50)"
-  echo "  40) Audit log stats"
-  echo "  41) Follow audit log"
-  echo "  42) Export audit log"
-  echo "  43) Clear audit log"
-  echo "  44) Health check"
-  echo "  45) System info"
-  echo "  46) Disk usage"
-  echo "  47) Run test suite"
+  echo "  41) Audit log (last 50)"
+  echo "  42) Audit log stats"
+  echo "  43) Follow audit log"
+  echo "  44) Export audit log"
+  echo "  45) Clear audit log"
+  echo "  46) Health check"
+  echo "  47) System info"
+  echo "  48) Disk usage"
+  echo "  49) Run test suite"
+  echo "  50) Run HTTP tests"
   echo ""
   echo "  --- Maintenance ---"
-  echo "  48) Update files from GitHub"
-  echo "  49) Check for updates"
-  echo "  50) Reinstall dependencies"
-  echo "  51) Backup config"
-  echo "  52) Restore config"
+  echo "  51) Update files from GitHub"
+  echo "  52) Check for updates"
+  echo "  53) Reinstall dependencies"
+  echo "  54) Backup config"
+  echo "  55) Restore config"
   echo ""
-  echo "  53) Show all commands"
+  echo "  56) Show all commands"
   echo "   0) Exit"
   echo ""
 }
@@ -1139,21 +1196,24 @@ menu_choice() {
     36) cmd_reset_totp ;;
     37) cmd_toggle_dialog ;;
     38) cmd_revoke_clients ;;
-    39) cmd_audit ;;
-    40) cmd_audit_stats ;;
-    41) echo "Press Ctrl+C to stop following."; cmd_tail_audit ;;
-    42) cmd_export_audit ;;
-    43) cmd_clear_audit ;;
-    44) cmd_health ;;
-    45) cmd_info ;;
-    46) cmd_disk ;;
-    47) cmd_test ;;
-    48) cmd_update ;;
-    49) cmd_check_update ;;
-    50) cmd_reinstall_deps ;;
-    51) cmd_backup ;;
-    52) cmd_restore ;;
-    53) cmd_list ;;
+    39) cmd_notify ;;
+    40) cmd_notify off ;;
+    41) cmd_audit ;;
+    42) cmd_audit_stats ;;
+    43) echo "Press Ctrl+C to stop following."; cmd_tail_audit ;;
+    44) cmd_export_audit ;;
+    45) cmd_clear_audit ;;
+    46) cmd_health ;;
+    47) cmd_info ;;
+    48) cmd_disk ;;
+    49) cmd_test ;;
+    50) cmd_test_http ;;
+    51) cmd_update ;;
+    52) cmd_check_update ;;
+    53) cmd_reinstall_deps ;;
+    54) cmd_backup ;;
+    55) cmd_restore ;;
+    56) cmd_list ;;
     0)  echo "Bye."; exit 0 ;;
     *)  echo "Invalid choice." ;;
   esac
@@ -1174,10 +1234,6 @@ show_menu() {
   done
 }
 
-# ============================================================
-# Help
-# ============================================================
-
 show_help() {
   cmd_list
 }
@@ -1191,7 +1247,6 @@ case "$1" in
   help|-h|--help)   show_help ;;
   list|commands)    cmd_list ;;
 
-  # Server
   start|restricted)       cmd_start_server restricted ;;
   unrestricted)           cmd_start_server unrestricted ;;
   stop)                   cmd_stop ;;
@@ -1203,7 +1258,6 @@ case "$1" in
   unlock)                 cmd_unlock "$2" ;;
   lock)                   cmd_lock ;;
 
-  # Sessions & logs
   sessions)               cmd_sessions ;;
   attach-ai)              cmd_attach_ai ;;
   attach-server)          cmd_attach_server ;;
@@ -1212,7 +1266,6 @@ case "$1" in
   show-ai-screen)         cmd_show_ai_screen ;;
   watch-ai)               cmd_watch_ai ;;
 
-  # URL & Tailscale
   url)                    cmd_url ;;
   open)                   cmd_open_url ;;
   copy)                   cmd_copy_url ;;
@@ -1224,7 +1277,6 @@ case "$1" in
   funnel)                 cmd_funnel "$2" ;;
   ts|tailscale)           cmd_ts_status ;;
 
-  # Auth
   factors)                cmd_factors ;;
   password)               cmd_password ;;
   totp)                   cmd_totp ;;
@@ -1234,8 +1286,8 @@ case "$1" in
   reset-totp)             cmd_reset_totp ;;
   toggle-dialog)          cmd_toggle_dialog ;;
   revoke-clients)         cmd_revoke_clients ;;
+  notify)                 cmd_notify "$2" ;;
 
-  # Logs & diagnostics
   audit)                  cmd_audit ;;
   audit-stats)            cmd_audit_stats ;;
   tail)                   cmd_tail_audit ;;
@@ -1245,8 +1297,8 @@ case "$1" in
   info)                   cmd_info ;;
   disk)                   cmd_disk ;;
   test)                   cmd_test ;;
+  test-http)              cmd_test_http ;;
 
-  # Maintenance
   update)                 cmd_update ;;
   check-update)           cmd_check_update ;;
   reinstall-deps)         cmd_reinstall_deps ;;

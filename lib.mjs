@@ -1,9 +1,6 @@
 import path from "node:path";
 import crypto from "node:crypto";
-
-// ============================================================
-// Command sanitizer
-// ============================================================
+import { HOME, ALLOWED_HOME_SUBPATHS } from "./config.mjs";
 
 export const RESTRICTED_ALLOWED = new Set([
   "ls", "pwd", "whoami", "id", "date", "uptime", "uname", "hostname",
@@ -17,17 +14,6 @@ export const UNRESTRICTED_DENIED = new Set([
   "mkfs", "fdisk", "parted", "mke2fs", "mkfs.ext4", "mkfs.f2fs"
 ]);
 
-export const DENIED_PATHS = [
-  ".ssh", ".aws", ".netrc", ".git-credentials", ".config/gh",
-  ".consent_password", ".tunnel_config", ".unlocked_until",
-  "termux-mcp/", ".cloudflared/", ".password-store", ".gnupg",
-  ".bash_history", ".zsh_history", ".npmrc", ".pypirc",
-  ".docker/config.json", ".kube/config", ".env", ".git/config",
-  "id_rsa", "id_ed25519", "id_ecdsa", "authorized_keys",
-  ".termux/", ".termux_authinfo", ".ssh_keys", ".totp_secret",
-  "server.mjs", "start.sh"
-];
-
 export const DANGEROUS_PATTERNS = [
   /rm\s+-[rRfF]*\s+\/(\s|$)/,
   /rm\s+-[rRfF]*\s+~(\s|$|\/)/,
@@ -40,13 +26,42 @@ export const DANGEROUS_PATTERNS = [
 
 export const RESTRICTED_BLOCKED_METACHARS = /[;&|<>$`(){}\[\]*?~\\\n\r\t]/;
 
-export function sanitizeCommand(cmd, allowUnrestricted) {
+function checkHomeSandbox(cmd) {
+  if (!ALLOWED_HOME_SUBPATHS || ALLOWED_HOME_SUBPATHS.length === 0) {
+    return { ok: true };
+  }
+
+  // Match the home prefix followed by optional subpath
+  const prefix = HOME.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(prefix + "(\\/[^\\s\"'`;|&<>]*)?", "g");
+
+  let m;
+  while ((m = re.exec(cmd)) !== null) {
+    const afterHome = m[1];
+    if (!afterHome || afterHome === "/") continue;
+
+    const clean = afterHome.startsWith("/") ? afterHome.slice(1) : afterHome;
+    if (clean === "") continue;
+
+    const firstSegment = clean.split("/")[0];
+    const allowed = ALLOWED_HOME_SUBPATHS.some(p =>
+      firstSegment === p || clean === p || clean.startsWith(p + "/")
+    );
+    if (!allowed) {
+      return { ok: false, reason: `home path not allowed: ~/${clean}` };
+    }
+  }
+
+  return { ok: true };
+}
+
+export function sanitizeCommand(cmd, allowUnrestricted, legacyDeniedPaths = []) {
   if (typeof cmd !== "string") return { ok: false, reason: "not a string" };
   if (cmd.length === 0) return { ok: false, reason: "empty" };
   if (cmd.length > 800) return { ok: false, reason: "too long (max 800 chars)" };
 
   const lower = cmd.toLowerCase();
-  for (const p of DENIED_PATHS) {
+  for (const p of legacyDeniedPaths) {
     if (lower.includes(p.toLowerCase())) {
       return { ok: false, reason: `path blocked: ${p}` };
     }
@@ -56,6 +71,12 @@ export function sanitizeCommand(cmd, allowUnrestricted) {
     if (pat.test(cmd)) {
       return { ok: false, reason: "dangerous pattern blocked" };
     }
+  }
+
+  // Home sandbox — applies in both modes
+  const home = checkHomeSandbox(cmd);
+  if (!home.ok) {
+    return { ok: false, reason: home.reason };
   }
 
   if (allowUnrestricted) {
@@ -78,10 +99,6 @@ export function sanitizeCommand(cmd, allowUnrestricted) {
   return { ok: true, command: tokens.join(" ") };
 }
 
-// ============================================================
-// Path sandboxing
-// ============================================================
-
 export function safePath(workdir, p = ".") {
   const base = path.resolve(workdir);
   const target = path.resolve(base, p);
@@ -91,17 +108,9 @@ export function safePath(workdir, p = ".") {
   return target;
 }
 
-// ============================================================
-// Session name validation
-// ============================================================
-
 export function validSession(name) {
   return typeof name === "string" && /^[a-zA-Z0-9_-]{1,40}$/.test(name);
 }
-
-// ============================================================
-// Timing-safe string compare
-// ============================================================
 
 export function timingSafeEq(a, b) {
   const ba = Buffer.from(String(a));

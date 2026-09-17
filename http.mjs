@@ -22,8 +22,12 @@ export async function createApp() {
     if (!tok) return res.status(401).json({ error: "unauthorized" });
 
     const ip = clientIp(req);
-    if (!oauth.rateLimit(`mcp:${ip}`, 120, 60_000)) {
+    if (!oauth.rateLimit(ip, "mcp")) {
       audit({ event: "mcp_rate_limited", ip, client_id: tok.client_id });
+      return res.status(429).json({ error: "rate_limited" });
+    }
+    if (!oauth.rateLimitByClient(tok.client_id, "mcp")) {
+      audit({ event: "mcp_rate_limited_client", client_id: tok.client_id });
       return res.status(429).json({ error: "rate_limited" });
     }
 
@@ -46,5 +50,14 @@ export async function createApp() {
     }
   });
 
-  return app;
+  app.get("/__stats", (req, res) => {
+    res.json({
+      clients: oauth.getClientCount(),
+      tokens: oauth.getTokenCount(),
+      refresh_tokens: oauth.getRefreshCount(),
+      recovery_codes: oauth.getRecoveryCount()
+    });
+  });
+
+  return { app, oauth };
 }

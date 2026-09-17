@@ -8,11 +8,30 @@ export async function createApp() {
   const oauth = await createOAuth();
   const app = express();
 
+  // Disable Express fingerprinting
+  app.disable("x-powered-by");
+
   app.use(express.json({ limit: "512kb" }));
   app.use(express.urlencoded({ extended: true }));
 
+  // Security headers on every response
+  app.use((req, res, next) => {
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'");
+    next();
+  });
+
   function clientIp(req) {
-    return (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.socket.remoteAddress || "unknown";
+    const addr = req.socket?.remoteAddress || "";
+    const trusted = addr === "127.0.0.1" || addr === "::1" || addr === "::ffff:127.0.0.1" || addr.startsWith("127.");
+    if (trusted) {
+      const fwd = (req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+      if (fwd) return fwd;
+    }
+    return addr || "unknown";
   }
 
   oauth.mountOAuth(app);

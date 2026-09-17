@@ -43,15 +43,6 @@ export function asUntrusted(content, source) {
   return `[UNTRUSTED DATA FROM ${source}${marker}]\n${cleaned}\n[END UNTRUSTED DATA]`;
 }
 
-/**
- * Send a push notification via ntfy.sh.
- *
- * Silent no-op if no topic is configured (~/termux-mcp/.ntfy_topic missing).
- * 2-second timeout — if the network is slow, the notification is skipped
- * rather than hanging any request handling. Never awaited by callers.
- *
- * Messages must not include IPs, client IDs, or secrets.
- */
 export async function notify(message) {
   let topic;
   try {
@@ -66,7 +57,68 @@ export async function notify(message) {
       body: message,
       signal: AbortSignal.timeout(2000)
     });
+  } catch {}
+}
+
+export async function analyzeAudit(options = {}) {
+  const days = options.days || 7;
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+
+  let raw;
+  try {
+    raw = await fs.readFile(AUDIT_FILE, "utf8");
   } catch {
-    // Network errors are non-fatal — notification is best-effort
+    return { entries: 0, error: "no audit log" };
   }
+
+  const lines = raw.trim().split("\n").filter(Boolean);
+  const entries = [];
+  for (const line of lines) {
+    try {
+      const e = JSON.parse(line);
+      if (new Date(e.ts).getTime() >= cutoff) entries.push(e);
+    } catch {}
+  }
+
+  const byEvent = {};
+  const byTool = {};
+  const byClient = {};
+  const failedAuth = [];
+  const commands = [];
+  const honeypots = [];
+
+  for (const e of entries) {
+    byEvent[e.event] = (byEvent[e.event] || 0) + 1;
+    if (e.tool) byTool[e.tool] = (byTool[e.tool] || 0) + 1;
+    if (e.client_id) byClient[e.client_id] = (byClient[e.client_id] || 0) + 1;
+
+    if (e.event === "approve_wrong_password" || e.event === "approve_wrong_totp") {
+      failedAuth.push({ ts: e.ts, event: e.event, client_id: e.client_id });
+    }
+    if (e.event === "mcp_call" && e.command) {
+      commands.push({ ts: e.ts, tool: e.tool, command: e.command });
+    }
+    if (e.event === "HONEYPOT_TRIGGERED") {
+      honeypots.push({ ts: e.ts, tool: e.tool });
+    }
+  }
+
+  function topN(obj, n = 5) {
+    return Object.entries(obj).sort((a, b) => b[1] - a[1]).slice(0, n);
+  }
+
+  return {
+    window_days: days,
+    entries: entries.length,
+    unique_clients: Object.keys(byClient).length,
+    events: topN(byEvent, 15),
+    tools: topN(byTool, 15),
+    clients: topN(byClient, 10),
+    failed_auth_count: failedAuth.length,
+    failed_auth_recent: failedAuth.slice(-5),
+    commands_count: commands.length,
+    commands_recent: commands.slice(-10),
+    honeypot_count: honeypots.length,
+    honeypot_recent: honeypots.slice(-5)
+  };
 }

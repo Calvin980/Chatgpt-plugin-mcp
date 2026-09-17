@@ -9,7 +9,7 @@ import {
   TOKEN_TTL_MS, REFRESH_TTL_MS,
   MAX_REGISTERED_CLIENTS, MAX_PENDING_AUTH_CODES,
   TOTP_MAX_FAILURES, TOTP_LOCKOUT_MS,
-  ALLOWED_REDIRECT_HOSTS
+  ALLOWED_REDIRECT_HOSTS, RATE_LIMITS
 } from "./config.mjs";
 import { audit, notify } from "./audit.mjs";
 import { timingSafeEq } from "./lib.mjs";
@@ -17,14 +17,11 @@ import { initState, loadMap, makePersister } from "./state.mjs";
 
 const execAsync = promisify(exec);
 
-// ============================================================
-// Factory — creates a fresh state + mount function per app
-// ============================================================
-
 export async function createOAuth() {
   let CONSENT_PASSWORD = null;
   let TOTP_SECRET = null;
   let USE_DIALOG = false;
+  let RECOVERY_CODES = new Map();
 
   try {
     CONSENT_PASSWORD = (await fs.readFile(path.join(DATA_DIR, ".consent_password"), "utf8")).trim();
@@ -36,6 +33,11 @@ export async function createOAuth() {
     await fs.access(path.join(DATA_DIR, ".use_dialog"));
     USE_DIALOG = true;
   } catch {}
+  try {
+    const raw = await fs.readFile(path.join(DATA_DIR, ".totp_recovery"), "utf8");
+    const parsed = JSON.parse(raw);
+    RECOVERY_CODES = new Map(Object.entries(parsed));
+  } catch {}
 
   await initState();
   const clients = await loadMap("clients");
@@ -45,6 +47,15 @@ export async function createOAuth() {
   const persistClients = makePersister("clients", clients);
   const persistTokens = makePersister("tokens", tokens);
   const persistRefreshTokens = makePersister("refresh_tokens", refreshTokens);
+
+  function persistRecovery() {
+    const obj = Object.fromEntries(RECOVERY_CODES);
+    const file = path.join(DATA_DIR, ".totp_recovery");
+    const tmp = file + ".tmp";
+    fs.writeFile(tmp, JSON.stringify(obj, null, 2), { mode: 0o600 })
+      .then(() => fs.rename(tmp, file))
+      .catch(() => {});
+  }
 
   {
     const now = Date.now();
@@ -57,43 +68,50 @@ export async function createOAuth() {
   const authCodes = new Map();
   const jwksCache = new Map();
   const totpAttempts = new Map();
-  const rateBuckets = new Map();
+  const ipBuckets = new Map();
+  const clientBuckets = new Map();
 
-  function rateLimit(key, max, windowMs) {
+  function checkBucket(key, limitName, buckets) {
+    const limits = RATE_LIMITS[limitName];
+    if (!limits) return true;
     const now = Date.now();
-    const arr = (rateBuckets.get(key) || []).filter(t => now - t < windowMs);
-    if (arr.length >= max) return false;
+    const arr = (buckets.get(key) || []).filter(t => now - t < limits.window_ms);
+    if (arr.length >= limits.max) return false;
     arr.push(now);
-    rateBuckets.set(key, arr);
+    buckets.set(key, arr);
     return true;
+  }
+
+  function rateLimit(key, limitName) {
+    return checkBucket(key, limitName, ipBuckets);
+  }
+  function rateLimitByClient(clientId, limitName) {
+    return checkBucket(clientId, limitName, clientBuckets);
   }
 
   const cleanupTimer = setInterval(() => {
     const now = Date.now();
-
-    for (const [k, arr] of rateBuckets) {
-      const fresh = arr.filter(t => now - t < 60_000);
-      if (fresh.length) rateBuckets.set(k, fresh);
-      else rateBuckets.delete(k);
+    for (const [k, arr] of ipBuckets) {
+      const fresh = arr.filter(t => now - t < 120_000);
+      if (fresh.length) ipBuckets.set(k, fresh);
+      else ipBuckets.delete(k);
     }
-
+    for (const [k, arr] of clientBuckets) {
+      const fresh = arr.filter(t => now - t < 120_000);
+      if (fresh.length) clientBuckets.set(k, fresh);
+      else clientBuckets.delete(k);
+    }
     for (const [k, v] of authCodes) if (v.expiresAt < now) authCodes.delete(k);
 
     let tokensChanged = false;
     for (const [k, v] of tokens) {
-      if (!v.expiresAt || v.expiresAt < now) {
-        tokens.delete(k);
-        tokensChanged = true;
-      }
+      if (!v.expiresAt || v.expiresAt < now) { tokens.delete(k); tokensChanged = true; }
     }
     if (tokensChanged) persistTokens.schedule();
 
     let refreshChanged = false;
     for (const [k, v] of refreshTokens) {
-      if (!v.expiresAt || v.expiresAt < now) {
-        refreshTokens.delete(k);
-        refreshChanged = true;
-      }
+      if (!v.expiresAt || v.expiresAt < now) { refreshTokens.delete(k); refreshChanged = true; }
     }
     if (refreshChanged) persistRefreshTokens.schedule();
   }, 60_000);
@@ -144,6 +162,20 @@ export async function createOAuth() {
     } catch (e) {
       return { ok: false, reason: "error", err: e.message };
     }
+  }
+
+  function tryRecoveryCode(input) {
+    if (!RECOVERY_CODES || RECOVERY_CODES.size === 0) return false;
+    if (!/^[a-zA-Z0-9-]{8,64}$/.test(input || "")) return false;
+    const hash = crypto.createHash("sha256").update(input).digest("hex");
+    if (RECOVERY_CODES.has(hash)) {
+      RECOVERY_CODES.delete(hash);
+      persistRecovery();
+      audit({ event: "recovery_code_used" });
+      notify("Termux MCP: recovery code used").catch(() => {});
+      return true;
+    }
+    return false;
   }
 
   function isLockedOut(ip) {
@@ -222,6 +254,24 @@ export async function createOAuth() {
     return tok;
   }
 
+  function revokeToken(token) {
+    let removed = 0;
+    if (tokens.delete(token)) { removed++; persistTokens.schedule(); }
+    if (refreshTokens.delete(token)) { removed++; persistRefreshTokens.schedule(); }
+    return removed;
+  }
+
+  function revokeClient(clientId) {
+    let count = 0;
+    for (const [k, v] of tokens) if (v.client_id === clientId) { tokens.delete(k); count++; }
+    for (const [k, v] of refreshTokens) if (v.client_id === clientId) { refreshTokens.delete(k); count++; }
+    if (count > 0) {
+      persistTokens.schedule();
+      persistRefreshTokens.schedule();
+    }
+    return count;
+  }
+
   function mountOAuth(app) {
 
     app.get("/.well-known/oauth-authorization-server", (req, res) => {
@@ -230,6 +280,7 @@ export async function createOAuth() {
         issuer: base,
         authorization_endpoint: `${base}/authorize`,
         token_endpoint: `${base}/token`,
+        revocation_endpoint: `${base}/revoke`,
         registration_endpoint: `${base}/register`,
         scopes_supported: ["mcp:tools"],
         response_types_supported: ["code"],
@@ -251,7 +302,7 @@ export async function createOAuth() {
 
     app.post("/register", (req, res) => {
       const ip = clientIp(req);
-      if (!rateLimit(`reg:${ip}`, 5, 60_000)) {
+      if (!rateLimit(ip, "register")) {
         audit({ event: "register_rate_limited", ip });
         return res.status(429).json({ error: "rate_limited" });
       }
@@ -298,7 +349,7 @@ export async function createOAuth() {
 
     app.get("/authorize", (req, res) => {
       const ip = clientIp(req);
-      if (!rateLimit(`auth:${ip}`, 20, 60_000)) {
+      if (!rateLimit(ip, "authorize")) {
         audit({ event: "authorize_rate_limited", ip });
         return res.status(429).send("Too many requests");
       }
@@ -317,7 +368,10 @@ export async function createOAuth() {
       }
 
       const pwField = CONSENT_PASSWORD ? `<label>Password: <input type="password" name="password" required autofocus></label><br><br>` : "";
-      const totpField = TOTP_SECRET ? `<label>TOTP code: <input type="text" name="totp_code" required pattern="[0-9]{6}" inputmode="numeric" autocomplete="one-time-code"></label><br><br>` : "";
+      const totpField = TOTP_SECRET ? `<label>TOTP code (or recovery code): <input type="text" name="totp_code" required autocomplete="one-time-code"></label><br><br>` : "";
+      const recoveryNote = (TOTP_SECRET && RECOVERY_CODES.size > 0)
+        ? `<p style="color:#888;font-size:0.85em">Lost your authenticator? Enter a recovery code instead. ${RECOVERY_CODES.size} remaining.</p>`
+        : "";
       const dialogNote = USE_DIALOG ? `<p style="color:#666;font-size:0.9em">After submitting, you'll be asked to approve on your phone.</p>` : "";
 
       res.send(`<!DOCTYPE html><html><body style="font-family:sans-serif;padding:2rem;max-width:500px;margin:auto">
@@ -330,14 +384,14 @@ export async function createOAuth() {
 <input type="hidden" name="code_challenge" value="${code_challenge}">
 <input type="hidden" name="code_challenge_method" value="${code_challenge_method}">
 <input type="hidden" name="scope" value="${scope || "mcp:tools"}">
-${pwField}${totpField}${dialogNote}
+${pwField}${totpField}${recoveryNote}${dialogNote}
 <button type="submit" style="padding:1rem 2rem;background:#0070f3;color:#fff;border:none;border-radius:5px;cursor:pointer">Approve</button>
 </form></body></html>`);
     });
 
     app.post("/authorize/approve", async (req, res) => {
       const ip = clientIp(req);
-      if (!rateLimit(`approve:${ip}`, 10, 60_000)) {
+      if (!rateLimit(ip, "approve")) {
         audit({ event: "approve_rate_limited", ip });
         return res.status(429).send("Too many requests");
       }
@@ -355,12 +409,25 @@ ${pwField}${totpField}${dialogNote}
       }
 
       if (TOTP_SECRET) {
-        const totp = await verifyTotp(totp_code);
-        recordTotpAttempt(ip, totp.ok);
-        if (!totp.ok) {
-          await audit({ event: "approve_wrong_totp", client_id, ip, reason: totp.reason });
-          if (isLockedOut(ip)) notify("Termux MCP: too many failed login attempts");
-          return res.status(401).send("Wrong or expired TOTP code");
+        let ok = false;
+        let reason = "wrong";
+
+        if (/^[0-9]{6}$/.test(totp_code || "")) {
+          const totp = await verifyTotp(totp_code);
+          ok = totp.ok;
+          reason = totp.reason || "wrong";
+        } else if (totp_code && tryRecoveryCode(totp_code)) {
+          ok = true;
+          reason = "recovery";
+        } else {
+          reason = "format";
+        }
+
+        recordTotpAttempt(ip, ok);
+        if (!ok) {
+          await audit({ event: "approve_wrong_totp", client_id, ip, reason });
+          if (isLockedOut(ip)) notify("Termux MCP: too many failed login attempts").catch(() => {});
+          return res.status(401).send("Wrong or expired code");
         }
       }
 
@@ -416,7 +483,7 @@ ${pwField}${totpField}${dialogNote}
 
     app.post("/token", async (req, res) => {
       const ip = clientIp(req);
-      if (!rateLimit(`token:${ip}`, 20, 60_000)) {
+      if (!rateLimit(ip, "token")) {
         audit({ event: "token_rate_limited", ip });
         return res.status(429).json({ error: "rate_limited" });
       }
@@ -428,6 +495,11 @@ ${pwField}${totpField}${dialogNote}
         const auth = await authenticateClient(req.body, base);
         if (!auth.ok) return res.status(401).json({ error: auth.error });
         const authedId = auth.clientId;
+
+        if (!rateLimitByClient(authedId, "token")) {
+          audit({ event: "token_rate_limited_client", client_id: authedId });
+          return res.status(429).json({ error: "rate_limited" });
+        }
 
         if (grant_type === "authorization_code") {
           const { code, redirect_uri, code_verifier } = req.body;
@@ -492,7 +564,44 @@ ${pwField}${totpField}${dialogNote}
         res.status(500).json({ error: "server_error" });
       }
     });
+
+    app.post("/revoke", async (req, res) => {
+      const ip = clientIp(req);
+      if (!rateLimit(ip, "revoke")) {
+        return res.status(429).json({ error: "rate_limited" });
+      }
+
+      try {
+        const base = publicUrl(req);
+        const auth = await authenticateClient(req.body, base);
+        if (!auth.ok) return res.status(401).json({ error: auth.error });
+
+        const { token } = req.body;
+        if (!token || typeof token !== "string") {
+          return res.status(400).json({ error: "invalid_request", error_description: "token required" });
+        }
+
+        const removed = revokeToken(token);
+        await audit({ event: "token_revoked", client_id: auth.clientId, removed });
+        res.status(200).json({ revoked: removed > 0 });
+      } catch (e) {
+        console.error("revoke error:", e);
+        res.status(500).json({ error: "server_error" });
+      }
+    });
   }
 
-  return { mountOAuth, checkBearer, rateLimit };
+  return {
+    mountOAuth,
+    checkBearer,
+    rateLimit,
+    rateLimitByClient,
+    revokeToken,
+    revokeClient,
+    getClientCount: () => clients.size,
+    getTokenCount: () => tokens.size,
+    getRefreshCount: () => refreshTokens.size,
+    getRecoveryCount: () => RECOVERY_CODES.size,
+    getRecoveryCodes: () => RECOVERY_CODES
+  };
 }

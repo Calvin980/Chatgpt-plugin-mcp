@@ -9,13 +9,49 @@ import {
   TOKEN_TTL_MS, REFRESH_TTL_MS,
   MAX_REGISTERED_CLIENTS, MAX_PENDING_AUTH_CODES,
   TOTP_MAX_FAILURES, TOTP_LOCKOUT_MS,
-  ALLOWED_REDIRECT_HOSTS, RATE_LIMITS
+  ALLOWED_REDIRECT_HOSTS, RATE_LIMITS,
+  CSRF_ENABLED, CSRF_TTL_MS,
+  CLIENT_TTL_OVERRIDES
 } from "./config.mjs";
 import { audit, notify } from "./audit.mjs";
-import { timingSafeEq } from "./lib.mjs";
+import { timingSafeEq, escapeHtml, generateCsrfToken } from "./lib.mjs";
 import { initState, loadMap, makePersister } from "./state.mjs";
 
 const execAsync = promisify(exec);
+
+// ---------- PKCE ABNF (RFC 7636) ----------
+// code_verifier = 43*128 unreserved characters
+const PKCE_VERIFIER_RE = /^[A-Za-z0-9\-._~]{43,128}$/;
+// code_challenge = 43 base64url chars (SHA256 output)
+const PKCE_CHALLENGE_RE = /^[A-Za-z0-9\-_]{43}$/;
+
+function validCodeVerifier(v) {
+  return typeof v === "string" && PKCE_VERIFIER_RE.test(v);
+}
+
+function validCodeChallenge(c) {
+  return typeof c === "string" && PKCE_CHALLENGE_RE.test(c);
+}
+
+// ---------- Trusted proxy detection ----------
+// x-forwarded-for is only trusted when the direct connection comes
+// from a known local proxy. Under Tailscale Funnel, requests arrive
+// from the local tunnel socket, so remoteAddress is always 127.0.0.1.
+function trustedForwarder(req) {
+  const addr = req.socket?.remoteAddress || "";
+  return addr === "127.0.0.1" ||
+         addr === "::1" ||
+         addr === "::ffff:127.0.0.1" ||
+         addr.startsWith("127.");
+}
+
+function clientIp(req) {
+  if (trustedForwarder(req)) {
+    const fwd = (req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+    if (fwd) return fwd;
+  }
+  return req.socket?.remoteAddress || "unknown";
+}
 
 export async function createOAuth() {
   let CONSENT_PASSWORD = null;
@@ -35,8 +71,7 @@ export async function createOAuth() {
   } catch {}
   try {
     const raw = await fs.readFile(path.join(DATA_DIR, ".totp_recovery"), "utf8");
-    const parsed = JSON.parse(raw);
-    RECOVERY_CODES = new Map(Object.entries(parsed));
+    RECOVERY_CODES = new Map(Object.entries(JSON.parse(raw)));
   } catch {}
 
   await initState();
@@ -66,10 +101,15 @@ export async function createOAuth() {
   }
 
   const authCodes = new Map();
+  const csrfTokens = new Map();  // csrf_token -> { client_id, expiresAt }
   const jwksCache = new Map();
   const totpAttempts = new Map();
   const ipBuckets = new Map();
   const clientBuckets = new Map();
+
+  // ---------- Refresh token lock map ----------
+  // Prevents concurrent refresh requests from both succeeding.
+  const refreshLocks = new Map();  // refresh_token -> Promise
 
   function checkBucket(key, limitName, buckets) {
     const limits = RATE_LIMITS[limitName];
@@ -82,12 +122,8 @@ export async function createOAuth() {
     return true;
   }
 
-  function rateLimit(key, limitName) {
-    return checkBucket(key, limitName, ipBuckets);
-  }
-  function rateLimitByClient(clientId, limitName) {
-    return checkBucket(clientId, limitName, clientBuckets);
-  }
+  function rateLimit(key, limitName) { return checkBucket(key, limitName, ipBuckets); }
+  function rateLimitByClient(clientId, limitName) { return checkBucket(clientId, limitName, clientBuckets); }
 
   const cleanupTimer = setInterval(() => {
     const now = Date.now();
@@ -102,6 +138,7 @@ export async function createOAuth() {
       else clientBuckets.delete(k);
     }
     for (const [k, v] of authCodes) if (v.expiresAt < now) authCodes.delete(k);
+    for (const [k, v] of csrfTokens) if (v.expiresAt < now) csrfTokens.delete(k);
 
     let tokensChanged = false;
     for (const [k, v] of tokens) {
@@ -121,10 +158,6 @@ export async function createOAuth() {
     const host = req.headers["x-forwarded-host"] || req.headers.host;
     const proto = req.headers["x-forwarded-proto"] || "https";
     return `${proto}://${host}`;
-  }
-
-  function clientIp(req) {
-    return (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.socket.remoteAddress || "unknown";
   }
 
   function getJwks(uri) {
@@ -272,6 +305,13 @@ export async function createOAuth() {
     return count;
   }
 
+  // ---------- Per-client TTL ----------
+  function ttlFor(clientId, type) {
+    const override = CLIENT_TTL_OVERRIDES[clientId];
+    if (override && override[type]) return override[type];
+    return type === "access" ? TOKEN_TTL_MS : REFRESH_TTL_MS;
+  }
+
   function mountOAuth(app) {
 
     app.get("/.well-known/oauth-authorization-server", (req, res) => {
@@ -313,6 +353,9 @@ export async function createOAuth() {
 
       const { client_name, redirect_uris, token_endpoint_auth_method, jwks_uri, jwks } = req.body || {};
 
+      // Sanitize client_name length
+      const safeName = typeof client_name === "string" ? client_name.slice(0, 200) : null;
+
       if (!Array.isArray(redirect_uris) || redirect_uris.length === 0) {
         audit({ event: "register_no_redirect", ip });
         return res.status(400).json({ error: "invalid_redirect_uri", error_description: "redirect_uris required" });
@@ -329,13 +372,13 @@ export async function createOAuth() {
 
       const clientId = crypto.randomUUID();
       clients.set(clientId, {
-        client_id: clientId, client_name,
+        client_id: clientId, client_name: safeName,
         redirect_uris,
         token_endpoint_auth_method: token_endpoint_auth_method || "none",
         jwks_uri: jwks_uri || null, jwks: jwks || null,
       });
       persistClients.schedule();
-      audit({ event: "register", client_id: clientId, name: client_name, ip });
+      audit({ event: "register", client_id: clientId, name: safeName, ip });
 
       res.status(201).json({
         client_id: clientId,
@@ -362,10 +405,27 @@ export async function createOAuth() {
         return res.status(400).send("PKCE required (S256)");
       }
 
+      // NEW: validate code_challenge ABNF
+      if (!validCodeChallenge(code_challenge)) {
+        audit({ event: "authorize_bad_challenge", client_id });
+        return res.status(400).send("code_challenge must be 43 base64url chars");
+      }
+
       if (!client.redirect_uris.includes(redirect_uri)) {
         audit({ event: "authorize_redirect_mismatch", client_id, redirect_uri, ip });
         return res.status(400).send("redirect_uri does not match registration");
       }
+
+      // NEW: generate CSRF token bound to this client_id
+      let csrfField = "";
+      if (CSRF_ENABLED) {
+        const csrf = generateCsrfToken();
+        csrfTokens.set(csrf, { client_id, expiresAt: Date.now() + CSRF_TTL_MS });
+        csrfField = `<input type="hidden" name="csrf" value="${csrf}">`;
+      }
+
+      // NEW: escape user-controlled strings
+      const displayName = escapeHtml(client.client_name || client_id);
 
       const pwField = CONSENT_PASSWORD ? `<label>Password: <input type="password" name="password" required autofocus></label><br><br>` : "";
       const totpField = TOTP_SECRET ? `<label>TOTP code (or recovery code): <input type="text" name="totp_code" required autocomplete="one-time-code"></label><br><br>` : "";
@@ -374,16 +434,20 @@ export async function createOAuth() {
         : "";
       const dialogNote = USE_DIALOG ? `<p style="color:#666;font-size:0.9em">After submitting, you'll be asked to approve on your phone.</p>` : "";
 
-      res.send(`<!DOCTYPE html><html><body style="font-family:sans-serif;padding:2rem;max-width:500px;margin:auto">
+      res.send(`<!DOCTYPE html><html><head>
+<meta charset="utf-8">
+<meta name="referrer" content="no-referrer">
+</head><body style="font-family:sans-serif;padding:2rem;max-width:500px;margin:auto">
 <h1>Approve Access</h1>
-<p><b>${client.client_name || client_id}</b> wants to use your Termux tools.</p>
+<p><b>${displayName}</b> wants to use your Termux tools.</p>
 <form method="POST" action="/authorize/approve">
-<input type="hidden" name="client_id" value="${client_id}">
-<input type="hidden" name="redirect_uri" value="${redirect_uri}">
-<input type="hidden" name="state" value="${state || ""}">
-<input type="hidden" name="code_challenge" value="${code_challenge}">
-<input type="hidden" name="code_challenge_method" value="${code_challenge_method}">
-<input type="hidden" name="scope" value="${scope || "mcp:tools"}">
+${csrfField}
+<input type="hidden" name="client_id" value="${escapeHtml(client_id)}">
+<input type="hidden" name="redirect_uri" value="${escapeHtml(redirect_uri)}">
+<input type="hidden" name="state" value="${escapeHtml(state || "")}">
+<input type="hidden" name="code_challenge" value="${escapeHtml(code_challenge)}">
+<input type="hidden" name="code_challenge_method" value="${escapeHtml(code_challenge_method)}">
+<input type="hidden" name="scope" value="${escapeHtml(scope || "mcp:tools")}">
 ${pwField}${totpField}${recoveryNote}${dialogNote}
 <button type="submit" style="padding:1rem 2rem;background:#0070f3;color:#fff;border:none;border-radius:5px;cursor:pointer">Approve</button>
 </form></body></html>`);
@@ -401,7 +465,22 @@ ${pwField}${totpField}${recoveryNote}${dialogNote}
         return res.status(429).send("Too many failed attempts. Try again later.");
       }
 
-      const { client_id, redirect_uri, state, code_challenge, code_challenge_method, scope, password, totp_code } = req.body;
+      const { client_id, redirect_uri, state, code_challenge, code_challenge_method, scope, password, totp_code, csrf } = req.body;
+
+      // NEW: CSRF check
+      if (CSRF_ENABLED) {
+        const stored = csrfTokens.get(csrf);
+        if (!stored || stored.expiresAt < Date.now() || stored.client_id !== client_id) {
+          await audit({ event: "approve_csrf_failed", client_id, ip });
+          return res.status(400).send("Invalid or expired form. Please restart the flow.");
+        }
+        csrfTokens.delete(csrf);
+      }
+
+      // NEW: validate code_challenge again
+      if (!code_challenge || code_challenge_method !== "S256" || !validCodeChallenge(code_challenge)) {
+        return res.status(400).send("PKCE required");
+      }
 
       if (CONSENT_PASSWORD && !timingSafeEq(password || "", CONSENT_PASSWORD)) {
         await audit({ event: "approve_wrong_password", client_id, ip });
@@ -437,10 +516,6 @@ ${pwField}${totpField}${recoveryNote}${dialogNote}
           await audit({ event: "approve_dialog_denied", client_id, ip, reason: dialog.reason });
           return res.status(401).send("Device approval denied or failed");
         }
-      }
-
-      if (!code_challenge || code_challenge_method !== "S256") {
-        return res.status(400).send("PKCE required");
       }
 
       const client = clients.get(client_id);
@@ -507,20 +582,32 @@ ${pwField}${totpField}${recoveryNote}${dialogNote}
           if (!ac || ac.client_id !== authedId || ac.expiresAt < Date.now() || ac.redirect_uri !== redirect_uri) {
             return res.status(400).json({ error: "invalid_grant" });
           }
-          if (ac.codeChallenge) {
-            const computed = crypto.createHash("sha256").update(code_verifier || "").digest("base64url");
-            if (computed !== ac.codeChallenge) {
-              return res.status(400).json({ error: "invalid_grant", error_description: "pkce mismatch" });
-            }
+
+          // NEW: validate code_verifier ABNF
+          if (!validCodeVerifier(code_verifier)) {
+            audit({ event: "token_bad_verifier", client_id: authedId });
+            return res.status(400).json({ error: "invalid_grant", error_description: "code_verifier must be 43-128 chars" });
           }
+
+          const computed = crypto.createHash("sha256").update(code_verifier).digest("base64url");
+          if (computed !== ac.codeChallenge) {
+            return res.status(400).json({ error: "invalid_grant", error_description: "pkce mismatch" });
+          }
+
           authCodes.delete(code);
 
           const accessToken = crypto.randomBytes(32).toString("hex");
           const refreshToken = crypto.randomBytes(32).toString("hex");
           const now = Date.now();
 
-          tokens.set(accessToken, { client_id: authedId, scope: ac.scope, expiresAt: now + TOKEN_TTL_MS });
-          refreshTokens.set(refreshToken, { client_id: authedId, scope: ac.scope, expiresAt: now + REFRESH_TTL_MS });
+          tokens.set(accessToken, {
+            client_id: authedId, scope: ac.scope,
+            expiresAt: now + ttlFor(authedId, "access")
+          });
+          refreshTokens.set(refreshToken, {
+            client_id: authedId, scope: ac.scope,
+            expiresAt: now + ttlFor(authedId, "refresh")
+          });
           persistTokens.schedule();
           persistRefreshTokens.schedule();
 
@@ -529,33 +616,61 @@ ${pwField}${totpField}${recoveryNote}${dialogNote}
             access_token: accessToken,
             refresh_token: refreshToken,
             token_type: "Bearer",
-            expires_in: Math.floor(TOKEN_TTL_MS / 1000),
+            expires_in: Math.floor(ttlFor(authedId, "access") / 1000),
             scope: ac.scope,
           });
         }
 
         if (grant_type === "refresh_token") {
           const { refresh_token } = req.body;
-          const rt = refreshTokens.get(refresh_token);
-          if (!rt || rt.client_id !== authedId || rt.expiresAt < Date.now()) {
-            return res.status(400).json({ error: "invalid_grant" });
+
+          // NEW: atomic refresh rotation via in-process lock
+          // Prevents two concurrent refreshes with the same token.
+          if (refreshLocks.has(refresh_token)) {
+            await audit({ event: "token_refresh_concurrent", client_id: authedId });
+            return res.status(400).json({ error: "invalid_grant", error_description: "concurrent refresh" });
           }
-          refreshTokens.delete(refresh_token);
-          const accessToken = crypto.randomBytes(32).toString("hex");
-          const newRefreshToken = crypto.randomBytes(32).toString("hex");
-          const now = Date.now();
-          tokens.set(accessToken, { client_id: authedId, scope: rt.scope, expiresAt: now + TOKEN_TTL_MS });
-          refreshTokens.set(newRefreshToken, { client_id: authedId, scope: rt.scope, expiresAt: now + REFRESH_TTL_MS });
-          persistTokens.schedule();
-          persistRefreshTokens.schedule();
-          await audit({ event: "token_refreshed", client_id: authedId });
-          return res.json({
-            access_token: accessToken,
-            refresh_token: newRefreshToken,
-            token_type: "Bearer",
-            expires_in: Math.floor(TOKEN_TTL_MS / 1000),
-            scope: rt.scope,
-          });
+
+          const lockPromise = Promise.resolve();
+          refreshLocks.set(refresh_token, lockPromise);
+
+          try {
+            const rt = refreshTokens.get(refresh_token);
+            if (!rt || rt.client_id !== authedId || rt.expiresAt < Date.now()) {
+              return res.status(400).json({ error: "invalid_grant" });
+            }
+
+            // Delete first, then issue — atomic within the lock
+            refreshTokens.delete(refresh_token);
+            persistRefreshTokens.schedule();
+
+            const accessToken = crypto.randomBytes(32).toString("hex");
+            const newRefreshToken = crypto.randomBytes(32).toString("hex");
+            const now = Date.now();
+
+            tokens.set(accessToken, {
+              client_id: authedId, scope: rt.scope,
+              expiresAt: now + ttlFor(authedId, "access")
+            });
+            refreshTokens.set(newRefreshToken, {
+              client_id: authedId, scope: rt.scope,
+              expiresAt: now + ttlFor(authedId, "refresh")
+            });
+            persistTokens.schedule();
+            persistRefreshTokens.schedule();
+
+            await audit({ event: "token_refreshed", client_id: authedId });
+            return res.json({
+              access_token: accessToken,
+              refresh_token: newRefreshToken,
+              token_type: "Bearer",
+              expires_in: Math.floor(ttlFor(authedId, "access") / 1000),
+              scope: rt.scope,
+            });
+          } finally {
+            // Clear the lock after a short cooldown to catch rapid double-fires
+            setTimeout(() => refreshLocks.delete(refresh_token), 5000);
+          }
         }
 
         return res.status(400).json({ error: "unsupported_grant_type" });
@@ -592,16 +707,11 @@ ${pwField}${totpField}${recoveryNote}${dialogNote}
   }
 
   return {
-    mountOAuth,
-    checkBearer,
-    rateLimit,
-    rateLimitByClient,
-    revokeToken,
-    revokeClient,
+    mountOAuth, checkBearer, rateLimit, rateLimitByClient,
+    revokeToken, revokeClient,
     getClientCount: () => clients.size,
     getTokenCount: () => tokens.size,
     getRefreshCount: () => refreshTokens.size,
     getRecoveryCount: () => RECOVERY_CODES.size,
-    getRecoveryCodes: () => RECOVERY_CODES
   };
 }

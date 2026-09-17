@@ -1,13 +1,60 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { DATA_DIR } from "./config.mjs";
+import { DATA_DIR, AUDIT_MAX_BYTES, AUDIT_KEEP_ROTATIONS } from "./config.mjs";
 
 const AUDIT_FILE = path.join(DATA_DIR, "audit.log");
 const NTFY_FILE = path.join(DATA_DIR, ".ntfy_topic");
 
+let auditBytes = 0;
+let rotationInFlight = false;
+
+export async function initAudit() {
+  try {
+    const stat = await fs.stat(AUDIT_FILE);
+    auditBytes = stat.size;
+  } catch {
+    auditBytes = 0;
+  }
+}
+
+async function rotateIfNeeded() {
+  if (rotationInFlight) return;
+  if (auditBytes < AUDIT_MAX_BYTES) return;
+
+  rotationInFlight = true;
+  try {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const rotated = `${AUDIT_FILE}.${stamp}`;
+    await fs.rename(AUDIT_FILE, rotated);
+    auditBytes = 0;
+
+    // Prune old rotations
+    const dir = path.dirname(AUDIT_FILE);
+    const base = path.basename(AUDIT_FILE);
+    const entries = await fs.readdir(dir);
+    const rotations = entries
+      .filter(f => f.startsWith(base + ".") && f !== base)
+      .sort();
+    while (rotations.length > AUDIT_KEEP_ROTATIONS) {
+      const oldest = rotations.shift();
+      try { await fs.unlink(path.join(dir, oldest)); } catch {}
+    }
+  } catch (e) {
+    console.error(`[audit] rotation failed: ${e.message}`);
+  } finally {
+    rotationInFlight = false;
+  }
+}
+
 export async function audit(event) {
   const line = JSON.stringify({ ts: new Date().toISOString(), ...event }) + "\n";
-  try { await fs.appendFile(AUDIT_FILE, line); } catch {}
+  try {
+    await fs.appendFile(AUDIT_FILE, line);
+    auditBytes += Buffer.byteLength(line);
+    if (auditBytes >= AUDIT_MAX_BYTES) {
+      rotateIfNeeded().catch(() => {});
+    }
+  } catch {}
 }
 
 const INJECTION_PATTERNS = [
@@ -30,7 +77,13 @@ const INJECTION_PATTERNS = [
   /javascript\s*:/i,
   /Important\s*:\s*disregard/i,
   /Instructions?\s+for\s+(the\s+)?(AI|assistant|model)/i,
-  /do\s+not\s+(tell|inform|mention\s+to)\s+the\s+user/i
+  /do\s+not\s+(tell|inform|mention\s+to)\s+the\s+user/i,
+  // NEW: more aggressive patterns
+  /as\s+an\s+ai\s+(assistant|model)/i,
+  /\[?\s*system\s+message\s*\]?/i,
+  /base64\s*:\s*[A-Za-z0-9+/=]{40,}/i,
+  /eval\s*\(/i,
+  /exec\s*\(/i
 ];
 
 export function asUntrusted(content, source) {

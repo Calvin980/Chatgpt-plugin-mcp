@@ -32,14 +32,7 @@ if (!PUBLIC_URL) {
   if (process.env.MCP_TEST === "1") {
     process.env.PUBLIC_URL = `http://127.0.0.1:${PORT}`;
   } else {
-    console.error("");
     console.error("ERROR: PUBLIC_URL is not set.");
-    console.error("");
-    console.error("This is required for OAuth metadata to work.");
-    console.error("If you started the server manually, set it:");
-    console.error("");
-    console.error("  PUBLIC_URL=https://your-machine.ts.net node server.mjs");
-    console.error("");
     process.exit(1);
   }
 }
@@ -69,16 +62,10 @@ export const MAX_REGISTERED_CLIENTS = cfg("max_clients", 20);
 export const MAX_PENDING_AUTH_CODES = cfg("max_pending_codes", 50);
 export const TOTP_MAX_FAILURES = cfg("totp_max_failures", 5);
 export const TOTP_LOCKOUT_MS = cfg("totp_lockout_ms", 15 * 60 * 1000);
-export const TOTP_RECOVERY_COUNT = cfg("totp_recovery_count", 10);
 
 export const ALLOWED_REDIRECT_HOSTS = cfg("allowed_redirect_hosts", [
-  "chatgpt.com",
-  "chat.openai.com",
-  "openai.com",
-  "claude.ai",
-  "anthropic.com",
-  "localhost",
-  "127.0.0.1"
+  "chatgpt.com", "chat.openai.com", "openai.com",
+  "claude.ai", "anthropic.com", "localhost", "127.0.0.1"
 ]);
 
 // ---------- Rate limits ----------
@@ -91,21 +78,16 @@ export const RATE_LIMITS = cfg("rate_limits", {
   mcp: { max: 120, window_ms: 60_000 }
 });
 
-// ---------- Idle session timeout ----------
+// ---------- Idle session ----------
 export const IDLE_TIMEOUT_MS = cfg("idle_timeout_ms", 30 * 60 * 1000);
 export const IDLE_CHECK_INTERVAL_MS = cfg("idle_check_interval_ms", 5 * 60 * 1000);
 export const ACTIVITY_FILE = path.join(DATA_DIR, ".mcp_ai_last_activity");
 
 // ---------- Home sandbox ----------
-// Any absolute path under HOME must start with one of these.
-// Empty array = no restriction.
 export const ALLOWED_HOME_SUBPATHS = cfg("allowed_home_subpaths", [
-  "mcp-work",
-  "mcp-ai-home",
-  "termux-mcp"
+  "mcp-work", "mcp-ai-home", "termux-mcp"
 ]);
 
-// Legacy blocklist — applied on top of the inverted rule.
 export const LEGACY_DENIED_PATHS = [
   ".ssh", ".aws", ".netrc", ".git-credentials", ".config/gh",
   ".consent_password", ".tunnel_config", ".unlocked_until",
@@ -117,3 +99,52 @@ export const LEGACY_DENIED_PATHS = [
   ".totp_recovery", "server.mjs", "start.sh", "config.mjs", "oauth.mjs",
   "tools.mjs", "http.mjs", "audit.mjs", "state.mjs", "lib.mjs"
 ];
+
+// ============================================================
+// NEW: Security constants
+// ============================================================
+
+// ---------- SSRF guard ----------
+// Hostnames and IP ranges the tmux sanitizer refuses to target.
+export const SSRF_BLOCKED_HOSTS = cfg("ssrf_blocked_hosts", [
+  "169.254.169.254",         // AWS/GCP/Azure metadata
+  "metadata.google.internal",
+  "metadata",
+  "100.100.100.200",         // Alibaba metadata
+  "192.0.0.192",             // Oracle Cloud metadata
+  "0.0.0.0", "::1", "::",
+  "localhost", "localhost.localdomain"
+]);
+
+export const SSRF_BLOCKED_CIDRS = cfg("ssrf_blocked_cidrs", [
+  "127.0.0.0/8",
+  "10.0.0.0/8",
+  "172.16.0.0/12",
+  "192.168.0.0/16",
+  "169.254.0.0/16",
+  "100.64.0.0/10",           // CGNAT
+  "fc00::/7", "fe80::/10"    // IPv6 private
+]);
+
+// ---------- Command substitution ----------
+// Block $() and backticks even in unrestricted mode. Prevents
+// shell-injection-style escapes around the path blocklist.
+export const BLOCK_SUBSTITUTION_UNRESTRICTED = cfg("block_substitution_unrestricted", true);
+
+// ---------- CSRF ----------
+export const CSRF_ENABLED = cfg("csrf_enabled", true);
+export const CSRF_TTL_MS = cfg("csrf_ttl_ms", 5 * 60 * 1000);
+
+// ---------- Tool integrity ----------
+export const TOOL_INTEGRITY_FILE = path.join(DATA_DIR, ".tools_hash");
+
+// ---------- Audit rotation ----------
+export const AUDIT_MAX_BYTES = cfg("audit_max_bytes", 10 * 1024 * 1024);  // 10 MB
+export const AUDIT_KEEP_ROTATIONS = cfg("audit_keep_rotations", 5);
+
+// ---------- Per-client TTL overrides ----------
+export const CLIENT_TTL_OVERRIDES = cfg("client_ttl_overrides", {});
+
+// ---------- Escape sequence stripping ----------
+// Strips ANSI escape codes from tmux read output.
+export const STRIP_ESCAPES = cfg("strip_escapes", true);

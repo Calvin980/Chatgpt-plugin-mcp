@@ -1,0 +1,50 @@
+{
+  "_comment": "Copy to ~/termux-mcp/config.json to override defaults. Delete any key to use its default.",
+
+  "timeout_fast_ms": 3000,
+  "timeout_med_ms": 5000,
+  "timeout_slow_ms": 10000,
+
+  "write_max_bytes": 131072,
+  "write_allowed_ext": [
+    ".txt", ".md", ".json", ".csv", ".log",
+    ".yaml", ".yml", ".toml", ".ini", ".conf",
+    ".html", ".css", ".xml", ".svg"
+  ],
+
+  "token_ttl_ms": 1800000,
+  "refresh_ttl_ms": 2592000000,
+  "max_clients": 20,
+  "max_pending_codes": 50,
+  "totp_max_failures": 5,
+  "totp_lockout_ms": 900000,
+  "totp_recovery_count": 10,
+
+  "allowed_redirect_hosts": [
+    "chatgpt.com",
+    "chat.openai.com",
+    "openai.com",
+    "claude.ai",
+    "anthropic.com",
+    "localhost",
+    "127.0.0.1"
+  ],
+
+  "rate_limits": {
+    "register": { "max": 5, "window_ms": 60000 },
+    "authorize": { "max": 20, "window_ms": 60000 },
+    "approve": { "max": 10, "window_ms": 60000 },
+    "token": { "max": 20, "window_ms": 60000 },
+    "revoke": { "max": 20, "window_ms": 60000 },
+    "mcp": { "max": 120, "window_ms": 60000 }
+  },
+
+  "idle_timeout_ms": 1800000,
+  "idle_check_interval_ms": 300000,
+
+  "allowed_home_subpaths": [
+    "mcp-work",
+    "mcp-ai-home",
+    "termux-mcp"
+  ]
+}

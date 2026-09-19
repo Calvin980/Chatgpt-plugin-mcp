@@ -19,10 +19,17 @@ import { initState, loadMap, makePersister } from "./state.mjs";
 
 const execAsync = promisify(exec);
 
+// ---------- Dialog timeout ----------
+// Kept low so the browser doesn't give up before the redirect fires.
+const DIALOG_TIMEOUT_MS = 25000;
+
+// ---------- CSRF reuse window ----------
+// After a successful use, the token stays valid this long so that
+// browser retries (triggered by the slow dialog) still work.
+const CSRF_REUSE_WINDOW_MS = 2 * 60 * 1000;
+
 // ---------- PKCE ABNF (RFC 7636) ----------
-// code_verifier = 43*128 unreserved characters
 const PKCE_VERIFIER_RE = /^[A-Za-z0-9\-._~]{43,128}$/;
-// code_challenge = 43 base64url chars (SHA256 output)
 const PKCE_CHALLENGE_RE = /^[A-Za-z0-9\-_]{43}$/;
 
 function validCodeVerifier(v) {
@@ -34,9 +41,6 @@ function validCodeChallenge(c) {
 }
 
 // ---------- Trusted proxy detection ----------
-// x-forwarded-for is only trusted when the direct connection comes
-// from a known local proxy. Under Tailscale Funnel, requests arrive
-// from the local tunnel socket, so remoteAddress is always 127.0.0.1.
 function trustedForwarder(req) {
   const addr = req.socket?.remoteAddress || "";
   return addr === "127.0.0.1" ||
@@ -101,15 +105,12 @@ export async function createOAuth() {
   }
 
   const authCodes = new Map();
-  const csrfTokens = new Map();  // csrf_token -> { client_id, expiresAt }
+  const csrfTokens = new Map();
   const jwksCache = new Map();
   const totpAttempts = new Map();
   const ipBuckets = new Map();
   const clientBuckets = new Map();
-
-  // ---------- Refresh token lock map ----------
-  // Prevents concurrent refresh requests from both succeeding.
-  const refreshLocks = new Map();  // refresh_token -> Promise
+  const refreshLocks = new Map();
 
   function checkBucket(key, limitName, buckets) {
     const limits = RATE_LIMITS[limitName];
@@ -224,18 +225,21 @@ export async function createOAuth() {
     if (ok) totpAttempts.set(ip, []);
   }
 
+  // ---------- Device dialog (with explicit error logging) ----------
   async function requestDeviceApproval() {
     if (!USE_DIALOG) return { ok: true, skipped: true };
     try {
       const { stdout } = await execAsync(
         `termux-dialog confirm -t "Termux MCP" -i "Approve connection?"`,
-        { shell: SHELL, timeout: 60000 }
+        { shell: SHELL, timeout: DIALOG_TIMEOUT_MS }
       );
       const result = JSON.parse(stdout.trim());
       if (result.code === 0 && result.text === "yes") return { ok: true };
       return { ok: false, reason: "denied" };
     } catch (e) {
-      return { ok: false, reason: "error", err: e.message };
+      await audit({ event: "dialog_error", err: e.message });
+      const isTimeout = /timeout|killed|SIGTERM/i.test(e.message);
+      return { ok: false, reason: isTimeout ? "timeout" : "error", err: e.message };
     }
   }
 
@@ -305,7 +309,6 @@ export async function createOAuth() {
     return count;
   }
 
-  // ---------- Per-client TTL ----------
   function ttlFor(clientId, type) {
     const override = CLIENT_TTL_OVERRIDES[clientId];
     if (override && override[type]) return override[type];
@@ -352,8 +355,6 @@ export async function createOAuth() {
       }
 
       const { client_name, redirect_uris, token_endpoint_auth_method, jwks_uri, jwks } = req.body || {};
-
-      // Sanitize client_name length
       const safeName = typeof client_name === "string" ? client_name.slice(0, 200) : null;
 
       if (!Array.isArray(redirect_uris) || redirect_uris.length === 0) {
@@ -405,7 +406,6 @@ export async function createOAuth() {
         return res.status(400).send("PKCE required (S256)");
       }
 
-      // NEW: validate code_challenge ABNF
       if (!validCodeChallenge(code_challenge)) {
         audit({ event: "authorize_bad_challenge", client_id });
         return res.status(400).send("code_challenge must be 43 base64url chars");
@@ -416,15 +416,13 @@ export async function createOAuth() {
         return res.status(400).send("redirect_uri does not match registration");
       }
 
-      // NEW: generate CSRF token bound to this client_id
       let csrfField = "";
       if (CSRF_ENABLED) {
         const csrf = generateCsrfToken();
-        csrfTokens.set(csrf, { client_id, expiresAt: Date.now() + CSRF_TTL_MS });
+        csrfTokens.set(csrf, { client_id, expiresAt: Date.now() + CSRF_TTL_MS, used: 0 });
         csrfField = `<input type="hidden" name="csrf" value="${csrf}">`;
       }
 
-      // NEW: escape user-controlled strings
       const displayName = escapeHtml(client.client_name || client_id);
 
       const pwField = CONSENT_PASSWORD ? `<label>Password: <input type="password" name="password" required autofocus></label><br><br>` : "";
@@ -467,17 +465,19 @@ ${pwField}${totpField}${recoveryNote}${dialogNote}
 
       const { client_id, redirect_uri, state, code_challenge, code_challenge_method, scope, password, totp_code, csrf } = req.body;
 
-      // NEW: CSRF check
+      // CSRF check — token stays valid for a short window after first
+      // use, so browser retries (triggered by the slow dialog) still work.
       if (CSRF_ENABLED) {
         const stored = csrfTokens.get(csrf);
         if (!stored || stored.expiresAt < Date.now() || stored.client_id !== client_id) {
           await audit({ event: "approve_csrf_failed", client_id, ip });
           return res.status(400).send("Invalid or expired form. Please restart the flow.");
         }
-        csrfTokens.delete(csrf);
+        stored.expiresAt = Date.now() + CSRF_REUSE_WINDOW_MS;
+        stored.used = (stored.used || 0) + 1;
+        await audit({ event: "approve_csrf_used", client_id, ip, count: stored.used });
       }
 
-      // NEW: validate code_challenge again
       if (!code_challenge || code_challenge_method !== "S256" || !validCodeChallenge(code_challenge)) {
         return res.status(400).send("PKCE required");
       }
@@ -583,7 +583,6 @@ ${pwField}${totpField}${recoveryNote}${dialogNote}
             return res.status(400).json({ error: "invalid_grant" });
           }
 
-          // NEW: validate code_verifier ABNF
           if (!validCodeVerifier(code_verifier)) {
             audit({ event: "token_bad_verifier", client_id: authedId });
             return res.status(400).json({ error: "invalid_grant", error_description: "code_verifier must be 43-128 chars" });
@@ -624,8 +623,6 @@ ${pwField}${totpField}${recoveryNote}${dialogNote}
         if (grant_type === "refresh_token") {
           const { refresh_token } = req.body;
 
-          // NEW: atomic refresh rotation via in-process lock
-          // Prevents two concurrent refreshes with the same token.
           if (refreshLocks.has(refresh_token)) {
             await audit({ event: "token_refresh_concurrent", client_id: authedId });
             return res.status(400).json({ error: "invalid_grant", error_description: "concurrent refresh" });
@@ -640,7 +637,6 @@ ${pwField}${totpField}${recoveryNote}${dialogNote}
               return res.status(400).json({ error: "invalid_grant" });
             }
 
-            // Delete first, then issue — atomic within the lock
             refreshTokens.delete(refresh_token);
             persistRefreshTokens.schedule();
 
@@ -668,7 +664,6 @@ ${pwField}${totpField}${recoveryNote}${dialogNote}
               scope: rt.scope,
             });
           } finally {
-            // Clear the lock after a short cooldown to catch rapid double-fires
             setTimeout(() => refreshLocks.delete(refresh_token), 5000);
           }
         }
